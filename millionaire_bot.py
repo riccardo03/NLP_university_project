@@ -150,7 +150,7 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     Select the correct RAG pipeline based on competition.
     """
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_entertainment(question_text)
+        return rag_entertainment(question_text, generate_answer_fn=generate_answer)
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
