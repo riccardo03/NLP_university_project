@@ -3,7 +3,12 @@ RAG pipeline for the Entertainment competition.
 DuckDuckGo search with optional LLM query distillation.
 """
 
+import re
 import concurrent.futures
+
+_ARTICLE_REF_RE = re.compile(
+    r'\baccording to (the article|the text|the passage)\b', re.I
+)
 
 _QUERY_GEN_SYSTEM = (
     "You are a search-query optimizer. "
@@ -19,11 +24,16 @@ def rag_entertainment(query: str, num_results: int = 3,
     Search DuckDuckGo for entertainment context.
     If generate_answer_fn is provided, distil query to ≤10 focused words first.
     """
+    # Strip document-reference phrases before distillation
+    clean_query = _ARTICLE_REF_RE.sub('', query).strip()
+    if clean_query != query:
+        print(f"  [RAG-Entertainment] Document-reference stripped: '{query[:60]}...'")
+
     # Stage 1: optional LLM query distillation
-    ddg_query = query
+    ddg_query = clean_query
     if generate_answer_fn is not None:
         try:
-            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, query, max_new_tokens=20)
+            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, clean_query, max_new_tokens=20)
             distilled = raw.strip().strip('"').strip("'")
             if distilled:
                 ddg_query = distilled
