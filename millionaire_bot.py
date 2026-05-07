@@ -12,6 +12,7 @@ import math
 import time
 import json
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import torch
@@ -62,7 +63,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     print("Ready to answer, the model is.")
 
 
-def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 10) -> str:
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 10, **kwargs) -> str:
     """
     Generate an answer with greedy decoding.
     Speed requires few tokens for most tasks; maths needs more for CoT.
@@ -74,11 +75,15 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
+    do_sample  = kwargs.pop("do_sample", False)
+    temperature = kwargs.pop("temperature", 1.0)
     outputs = _pipe(
         messages,
         max_new_tokens=max_new_tokens,
-        do_sample=False,
+        do_sample=do_sample,
+        temperature=temperature if do_sample else 1.0,
         return_full_text=False,
+        **kwargs,
     )
     # String or message list, both we handle
     result = outputs[0]["generated_text"]
@@ -104,8 +109,12 @@ SYSTEM_PROMPTS = {
     ),
     COMP_SCIENCE_NATURE: (
         "A scientist with deep knowledge of biology, chemistry, physics, and natural phenomena you are. "
-        "Given a multiple-choice question and context, reply with ONLY the digit "
-        "(0, 1, 2, or 3) of the best answer. No explanation needed."
+        "Read the provided context carefully. "
+        "Reason step by step: first eliminate clearly wrong options, then explain why the remaining ones are plausible, "
+        "and finally commit to the best answer. "
+        "On the very last line of your response, write exactly:\n"
+        "ANSWER: <digit>\n"
+        "where <digit> is 0, 1, 2, or 3 — the index of the correct option. No text after that line."
     ),
     COMP_MATHS: (
         "You are a precise mathematician. "
@@ -176,58 +185,126 @@ def rag_history(query: str, sentences: int = 5) -> str:
         return ""
 
 
-# --- 4c. Science & Nature → Wikipedia with Wikidata fallback ---
+# --- 4c. Science & Nature — multi-stage RAG pipeline ---
 
-def _wikidata_sparql(query: str) -> str:
-    """Query Wikidata SPARQL endpoint for a scientific entity description."""
-    import urllib.request
-    import urllib.parse
+# Cross-encoder loaded lazily on first Science question, heavy it need not be at import
+_reranker = None
 
-    # A label-based search on Wikidata, we perform
-    sparql = f"""
-    SELECT ?item ?itemLabel ?itemDescription WHERE {{
-      SERVICE wikibase:mwapi {{
-        bd:serviceParam wikibase:endpoint "www.wikidata.org";
-                        wikibase:api "EntitySearch";
-                        mwapi:search "{query}";
-                        mwapi:language "en".
-        ?item wikibase:apiOutputItem mwapi:item.
-      }}
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-    }}
-    LIMIT 1
+
+def _get_reranker():
+    """Load (and cache) the cross-encoder model. Once loaded, remember it we do."""
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        print("  [RAG-Science] Loading cross-encoder, patience you must have...")
+        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        print("  [RAG-Science] Cross-encoder ready, it is.")
+    return _reranker
+
+
+# Stage 1 — Query Generation
+_QUERY_GEN_SYSTEM = (
+    "You are a search-query generator. "
+    "Given a quiz question and its options, return a JSON object with exactly this structure:\n"
+    '{"queries": ["query1", "query2", "query3"]}\n'
+    "The three queries must be distinct, complementary Wikipedia/web search queries "
+    "that together cover the key concepts needed to answer the question. "
+    "Return raw JSON only — no markdown, no explanation."
+)
+
+
+def _generate_search_queries(question_text: str, option_texts: list) -> list:
     """
-    url = "https://query.wikidata.org/sparql"
-    params = urllib.parse.urlencode({"query": sparql, "format": "json"})
-    full_url = f"{url}?{params}"
+    Ask the LLM to propose three search queries for a science question.
+    Diverse queries, better coverage they give.
+    """
+    opts_str = ", ".join(f'"{t}"' for t in option_texts)
+    user_msg = f'Question: {question_text}\nOptions: [{opts_str}]'
     try:
-        req = urllib.request.Request(
-            full_url,
-            headers={"User-Agent": "PoliMillionaireBot/1.0 (NLP assignment)"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-        bindings = data.get("results", {}).get("bindings", [])
-        if bindings:
-            desc = bindings[0].get("itemDescription", {}).get("value", "")
-            label = bindings[0].get("itemLabel", {}).get("value", "")
-            return f"{label}: {desc}" if desc else label
-    except Exception:
-        pass
-    return ""
+        raw = generate_answer(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=120)
+        # Extract JSON object from response
+        json_match = re.search(r'\{.*?"queries".*?\}', raw, re.S)
+        if json_match:
+            data = json.loads(json_match.group())
+            queries = [q.strip() for q in data.get("queries", []) if q.strip()]
+            if queries:
+                return queries[:3]
+    except Exception as exc:
+        print(f"  [RAG-Science] Query generation failed: {exc}")
+    return [question_text]
 
 
-def rag_science(query: str) -> str:
+# Stage 2 — Parallel Multi-Source Retrieval
+def _retrieve_parallel(queries: list) -> list:
     """
-    Wikipedia first, Wikidata fallback — science RAG, this is.
-    Broad the knowledge of science is; multiple sources, we need.
+    Run Wikipedia and DuckDuckGo in parallel for every query.
+    Fast retrieval across sources, ThreadPoolExecutor provides.
     """
-    context = rag_history(query, sentences=5)  # Wikipedia reused, efficient we are
-    if context:
-        return context
-    # Fallback to Wikidata when Wikipedia fails
-    print("  [RAG-Science] Wikipedia failed. Wikidata, we try.")
-    return _wikidata_sparql(query)
+    tasks = []
+    for q in queries:
+        tasks.append(("wiki", q))
+        tasks.append(("ddg",  q))
+
+    snippets = []
+    seen = set()
+
+    def _fetch(source, query):
+        if source == "wiki":
+            return rag_history(query, sentences=4)
+        else:
+            return rag_entertainment(query, num_results=2)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_fetch, src, q): (src, q) for src, q in tasks}
+        for fut in as_completed(futures, timeout=15):
+            try:
+                text = fut.result()
+            except Exception:
+                text = ""
+            if text and text not in seen:
+                seen.add(text)
+                snippets.append(text)
+
+    return snippets
+
+
+# Stage 3 — Cross-Encoder Re-ranking
+def _rerank(question_text: str, snippets: list, top_k: int = 3) -> str:
+    """
+    Score each snippet against the question; keep the top-k.
+    Relevant context rises to the top, irrelevant falls away.
+    """
+    if not snippets:
+        return ""
+    reranker = _get_reranker()
+    pairs = [(question_text, s) for s in snippets]
+    scores = reranker.predict(pairs)
+    ranked = sorted(zip(scores, snippets), reverse=True)
+    top_snippets = [s for _, s in ranked[:top_k]]
+    return "\n\n".join(top_snippets)
+
+
+def rag_science(question_text: str, option_texts: list = None) -> str:
+    """
+    Multi-stage science RAG: query generation → parallel retrieval → re-ranking.
+    Wikidata dropped; cross-encoder reranking added, better coverage achieved.
+    """
+    if option_texts is None:
+        option_texts = []
+
+    # Stage 1: generate diverse queries
+    queries = _generate_search_queries(question_text, option_texts)
+    print(f"  [RAG-Science] Queries generated: {queries}")
+
+    # Stage 2: parallel multi-source retrieval
+    snippets = _retrieve_parallel(queries)
+    print(f"  [RAG-Science] Snippets retrieved: {len(snippets)}")
+
+    if not snippets:
+        return ""
+
+    # Stage 3: re-rank and return top context
+    return _rerank(question_text, snippets, top_k=3)
 
 
 # --- 4d. Maths → calculator tool ---
@@ -383,7 +460,7 @@ def build_user_prompt(question_text: str, options: list, context: str) -> str:
 # Section 7 · RAG dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_context(comp_id: int, question_text: str) -> str:
+def get_context(comp_id: int, question_text: str, option_texts: list = None) -> str:
     """
     Select the correct RAG pipeline based on competition.
     Know which tool to use, a wise bot must.
@@ -393,7 +470,7 @@ def get_context(comp_id: int, question_text: str) -> str:
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
-        return rag_science(question_text)
+        return rag_science(question_text, option_texts or [])
     elif comp_id == COMP_MATHS:
         return rag_maths(question_text)
     return ""
@@ -439,10 +516,12 @@ def play_game(game, comp_id: int) -> dict:
         for opt in question.options:
             print(f"  [{opt.id}] {opt.text}")
 
+        option_texts = [opt.text for opt in question.options]
+
         # Retrieve context from the appropriate RAG tool
         print("  [RAG] Searching for context, we are...")
         t0 = time.time()
-        context = get_context(comp_id, question.text)
+        context = get_context(comp_id, question.text, option_texts)
         rag_elapsed = time.time() - t0
 
         snippet = context[:120].replace("\n", " ") if context else "(none)"
@@ -452,11 +531,32 @@ def play_game(game, comp_id: int) -> dict:
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking, the model is...")
         t1 = time.time()
-        tokens = 200 if comp_id == COMP_MATHS else 10
-        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
-        llm_elapsed = time.time() - t1
+        if comp_id == COMP_MATHS:
+            tokens = 200
+        elif comp_id == COMP_SCIENCE_NATURE:
+            tokens = 300
+        else:
+            tokens = 10
 
+        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))
+
+        # Stage 5 — Adaptive self-consistency for Science (levels 6+ with time to spare)
+        if comp_id == COMP_SCIENCE_NATURE and level >= 6 and time_left > 20.0:
+            print("  [LLM] Self-consistency sampling, we do (level >= 6)...")
+            votes = [answer_id]
+            for _ in range(2):
+                alt_out = generate_answer(
+                    system_prompt, user_prompt,
+                    max_new_tokens=tokens,
+                    do_sample=True, temperature=0.7,
+                )
+                votes.append(extract_answer_id(alt_out, num_options=len(question.options)))
+            # Majority vote — ties broken by greedy result (first vote)
+            answer_id = max(set(votes), key=votes.count)
+            print(f"  [LLM] Votes: {votes} → majority: {answer_id}")
+
+        llm_elapsed = time.time() - t1
         print(f"  [LLM] Output: '{raw_output}' → Answer ID: {answer_id} (in {llm_elapsed:.1f}s)")
 
         # Record question before submitting
