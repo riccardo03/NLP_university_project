@@ -255,7 +255,7 @@ def play_game(game, comp_id: int) -> dict:
         option_texts = [opt.text for opt in question.options]
 
         # Retrieve context from the appropriate RAG tool
-        print("  [RAG] Searching for context...")
+        print("  [RAG] Searching for CONTEXT...")
         t0 = time.time()
         context = get_context(comp_id, question.text, option_texts)
         rag_elapsed = time.time() - t0

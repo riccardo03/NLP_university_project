@@ -33,7 +33,7 @@ def rag_entertainment(query: str, num_results: int = 3,
     ddg_query = clean_query
     if generate_answer_fn is not None:
         try:
-            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, clean_query, max_new_tokens=20)
+            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, clean_query, 20)
             distilled = raw.strip().strip('"').strip("'")
             if distilled:
                 ddg_query = distilled
