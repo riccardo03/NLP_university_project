@@ -53,11 +53,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         model=_model,
         tokenizer=_tokenizer,
     )
-    # Clear conflicting generation_config fields that cause deprecation warnings
-    _model.generation_config.max_length   = None
-    _model.generation_config.temperature  = None
-    _model.generation_config.top_p        = None
-    _model.generation_config.top_k        = None
+    # Remove generation_config fields that conflict with explicit call-site kwargs
+    for _field in ("max_length", "temperature", "top_p", "top_k"):
+        try:
+            delattr(_model.generation_config, _field)
+        except AttributeError:
+            pass
     print("The model is ready to answer.")
     warmup_models()
 
