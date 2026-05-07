@@ -80,6 +80,7 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     temperature = kwargs.pop("temperature", 1.0)
     gen_kwargs  = dict(
         max_new_tokens=max_new_tokens,
+        max_length=None,          # suppress model-default max_length conflict
         do_sample=do_sample,
         return_full_text=False,
         **kwargs,
@@ -233,8 +234,8 @@ def _generate_search_queries(question_text: str, option_texts: list) -> list:
     opts_str = ", ".join(f'"{t}"' for t in option_texts)
     user_msg = f'Question: {question_text}\nOptions: [{opts_str}]'
     try:
-        raw = generate_answer(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=120)
-        # Extract JSON object from response
+        # 60 tokens is enough for a compact JSON array; keep it fast inside the timer
+        raw = generate_answer(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=60)
         json_match = re.search(r'\{.*?"queries".*?\}', raw, re.S)
         if json_match:
             data = json.loads(json_match.group())
@@ -304,19 +305,23 @@ def rag_science(question_text: str, option_texts: list = None) -> str:
     if option_texts is None:
         option_texts = []
 
-    # Stage 1: generate diverse queries
+    t_start = time.time()
+
+    # Stage 1: generate diverse queries (LLM call — kept to 60 tokens for speed)
     queries = _generate_search_queries(question_text, option_texts)
-    print(f"  [RAG-Science] Queries generated: {queries}")
+    print(f"  [RAG-Science] Queries generated in {time.time()-t_start:.1f}s: {queries}")
 
     # Stage 2: parallel multi-source retrieval
     snippets = _retrieve_parallel(queries)
-    print(f"  [RAG-Science] Snippets retrieved: {len(snippets)}")
+    print(f"  [RAG-Science] {len(snippets)} snippets in {time.time()-t_start:.1f}s total")
 
     if not snippets:
         return ""
 
     # Stage 3: re-rank and return top context
-    return _rerank(question_text, snippets, top_k=3)
+    context = _rerank(question_text, snippets, top_k=3)
+    print(f"  [RAG-Science] RAG complete in {time.time()-t_start:.1f}s")
+    return context
 
 
 # --- 4d. Maths → calculator tool ---
