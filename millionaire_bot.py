@@ -61,6 +61,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         tokenizer=_tokenizer,
     )
     print("Ready to answer, the model is.")
+    warmup_models()
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 10, **kwargs) -> str:
@@ -90,6 +91,16 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     if isinstance(result, str):
         return result.strip()
     return result[-1]["content"].strip()
+
+
+def warmup_models() -> None:
+    """
+    Force-load all lazily-initialized models before the game timer starts.
+    Warm the cross-encoder now, cold timeouts later we avoid.
+    """
+    print("  [Warmup] Loading cross-encoder, before game starts...")
+    _rerank("warmup", ["warmup"])
+    print("  [Warmup] All models ready, they are.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +149,7 @@ def rag_entertainment(query: str, num_results: int = 3) -> str:
     The web, our knowledge base it is.
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         results = []
         with DDGS() as ddgs:
