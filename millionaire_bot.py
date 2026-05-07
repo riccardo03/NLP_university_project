@@ -60,6 +60,16 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         model=_model,
         tokenizer=_tokenizer,
     )
+    # Replace model-card generation_config to eliminate max_length/temperature conflicts
+    from transformers import GenerationConfig
+    _model.generation_config = GenerationConfig(
+        eos_token_id=_tokenizer.eos_token_id,
+        pad_token_id=(
+            _tokenizer.pad_token_id
+            if _tokenizer.pad_token_id is not None
+            else _tokenizer.eos_token_id
+        ),
+    )
     print("Ready to answer, the model is.")
     warmup_models()
 
@@ -80,7 +90,6 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     temperature = kwargs.pop("temperature", 1.0)
     gen_kwargs  = dict(
         max_new_tokens=max_new_tokens,
-        max_length=None,          # suppress model-default max_length conflict
         do_sample=do_sample,
         return_full_text=False,
         **kwargs,
@@ -122,12 +131,8 @@ SYSTEM_PROMPTS = {
     ),
     COMP_SCIENCE_NATURE: (
         "A scientist with deep knowledge of biology, chemistry, physics, and natural phenomena you are. "
-        "Read the provided context carefully. "
-        "Reason step by step: first eliminate clearly wrong options, then explain why the remaining ones are plausible, "
-        "and finally commit to the best answer. "
-        "On the very last line of your response, write exactly:\n"
-        "ANSWER: <digit>\n"
-        "where <digit> is 0, 1, 2, or 3 — the index of the correct option. No text after that line."
+        "Read the context, then reply with exactly: ANSWER: <digit> "
+        "where <digit> is 0, 1, 2, or 3 — the index of the correct option. No other text."
     ),
     COMP_MATHS: (
         "You are a precise mathematician. "
@@ -215,36 +220,19 @@ def _get_reranker():
     return _reranker
 
 
-# Stage 1 — Query Generation
-_QUERY_GEN_SYSTEM = (
-    "You are a search-query generator. "
-    "Given a quiz question and its options, return a JSON object with exactly this structure:\n"
-    '{"queries": ["query1", "query2", "query3"]}\n'
-    "The three queries must be distinct, complementary Wikipedia/web search queries "
-    "that together cover the key concepts needed to answer the question. "
-    "Return raw JSON only — no markdown, no explanation."
-)
-
-
+# Stage 1 — Query Generation (rule-based, no LLM call — fast inside the timer it must be)
 def _generate_search_queries(question_text: str, option_texts: list) -> list:
     """
-    Ask the LLM to propose three search queries for a science question.
-    Diverse queries, better coverage they give.
+    Build search queries from question text and options without an LLM call.
+    Instant this is; 20 seconds wasted on generation, we avoid.
     """
-    opts_str = ", ".join(f'"{t}"' for t in option_texts)
-    user_msg = f'Question: {question_text}\nOptions: [{opts_str}]'
-    try:
-        # 60 tokens is enough for a compact JSON array; keep it fast inside the timer
-        raw = generate_answer(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=60)
-        json_match = re.search(r'\{.*?"queries".*?\}', raw, re.S)
-        if json_match:
-            data = json.loads(json_match.group())
-            queries = [q.strip() for q in data.get("queries", []) if q.strip()]
-            if queries:
-                return queries[:3]
-    except Exception as exc:
-        print(f"  [RAG-Science] Query generation failed: {exc}")
-    return [question_text]
+    queries = [question_text]
+    # Add question+option combos for the first two options as complementary queries
+    for opt in option_texts[:2]:
+        words = opt.split()
+        if len(words) >= 2:
+            queries.append(f"{question_text} {opt}")
+    return queries[:3]
 
 
 # Stage 2 — Parallel Multi-Source Retrieval
@@ -263,7 +251,11 @@ def _retrieve_parallel(queries: list) -> list:
 
     def _fetch(source, query):
         if source == "wiki":
-            return rag_history(query, sentences=4)
+            result = rag_history(query, sentences=4)
+            # Wikipedia parse failures return ""; fall through to DuckDuckGo
+            if not result:
+                result = rag_entertainment(query, num_results=2)
+            return result
         else:
             return rag_entertainment(query, num_results=2)
 
@@ -550,28 +542,13 @@ def play_game(game, comp_id: int) -> dict:
         t1 = time.time()
         if comp_id == COMP_MATHS:
             tokens = 200
-        elif comp_id == COMP_SCIENCE_NATURE:
-            tokens = 300
         else:
-            tokens = 10
+            tokens = 30
 
         raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))
 
-        # Stage 5 — Adaptive self-consistency for Science (levels 6+ with time to spare)
-        if comp_id == COMP_SCIENCE_NATURE and level >= 6 and time_left > 20.0:
-            print("  [LLM] Self-consistency sampling, we do (level >= 6)...")
-            votes = [answer_id]
-            for _ in range(2):
-                alt_out = generate_answer(
-                    system_prompt, user_prompt,
-                    max_new_tokens=tokens,
-                    do_sample=True, temperature=0.7,
-                )
-                votes.append(extract_answer_id(alt_out, num_options=len(question.options)))
-            # Majority vote — ties broken by greedy result (first vote)
-            answer_id = max(set(votes), key=votes.count)
-            print(f"  [LLM] Votes: {votes} → majority: {answer_id}")
+        # Self-consistency disabled — model is too slow (~2 tok/s) for 3 LLM calls in 30s
 
         llm_elapsed = time.time() - t1
         print(f"  [LLM] Output: '{raw_output}' → Answer ID: {answer_id} (in {llm_elapsed:.1f}s)")
