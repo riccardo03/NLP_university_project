@@ -76,16 +76,17 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    do_sample  = kwargs.pop("do_sample", False)
+    do_sample   = kwargs.pop("do_sample", False)
     temperature = kwargs.pop("temperature", 1.0)
-    outputs = _pipe(
-        messages,
+    gen_kwargs  = dict(
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
-        temperature=temperature if do_sample else 1.0,
         return_full_text=False,
         **kwargs,
     )
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+    outputs = _pipe(messages, **gen_kwargs)
     # String or message list, both we handle
     result = outputs[0]["generated_text"]
     if isinstance(result, str):
