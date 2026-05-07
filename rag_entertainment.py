@@ -35,7 +35,7 @@ def _wiki(query: str, sentences: int = 5) -> str:
 
 
 def rag_entertainment(query: str, num_results: int = 3,
-                      generate_answer_fn=None) -> str:
+                      generate_answer_fn=None, option_texts: list = None) -> str:
     """
     Wikipedia + DuckDuckGo search for entertainment context.
     If generate_answer_fn is provided, distil query to ≤10 focused words first.
@@ -52,7 +52,9 @@ def rag_entertainment(query: str, num_results: int = 3,
     ddg_query = query
     if generate_answer_fn is not None:
         try:
-            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, query, 20)
+            opts_str = " / ".join(option_texts) if option_texts else ""
+            user_msg = f"Question: {query}\nOptions: {opts_str}" if opts_str else query
+            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
             distilled = raw.strip().strip('"').strip("'")
             if distilled:
                 ddg_query = distilled

@@ -53,12 +53,10 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         model=_model,
         tokenizer=_tokenizer,
     )
-    # Remove generation_config fields that conflict with explicit call-site kwargs
-    for _field in ("max_length", "temperature", "top_p", "top_k"):
-        try:
-            delattr(_model.generation_config, _field)
-        except AttributeError:
-            pass
+    _model.generation_config.max_length   = None
+    _model.generation_config.temperature  = None
+    _model.generation_config.top_p        = None
+    _model.generation_config.top_k        = None
     print("The model is ready to answer.")
     warmup_models()
 
@@ -150,7 +148,8 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     Select the correct RAG pipeline based on competition.
     """
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_entertainment(question_text, generate_answer_fn=generate_answer)
+        return rag_entertainment(question_text, generate_answer_fn=generate_answer,
+                                 option_texts=option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
