@@ -52,7 +52,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         trust_remote_code=True,
     )
     _pipe = pipeline(
@@ -60,16 +60,11 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         model=_model,
         tokenizer=_tokenizer,
     )
-    # Replace model-card generation_config to eliminate max_length/temperature conflicts
-    from transformers import GenerationConfig
-    _model.generation_config = GenerationConfig(
-        eos_token_id=_tokenizer.eos_token_id,
-        pad_token_id=(
-            _tokenizer.pad_token_id
-            if _tokenizer.pad_token_id is not None
-            else _tokenizer.eos_token_id
-        ),
-    )
+    # Clear conflicting generation_config fields that cause deprecation warnings
+    _model.generation_config.max_length   = None
+    _model.generation_config.temperature  = None
+    _model.generation_config.top_p        = None
+    _model.generation_config.top_k        = None
     print("Ready to answer, the model is.")
     warmup_models()
 
@@ -96,6 +91,8 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     )
     if do_sample:
         gen_kwargs["temperature"] = temperature
+    # None values cause pipeline warnings — strip them before passing
+    gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
     outputs = _pipe(messages, **gen_kwargs)
     # String or message list, both we handle
     result = outputs[0]["generated_text"]
@@ -184,6 +181,10 @@ def rag_history(query: str, sentences: int = 5) -> str:
     try:
         import wikipedia
 
+        # Wikipedia hard-limits queries to ~300 chars; truncate at word boundary we must
+        if len(query) > 280:
+            query = query[:280].rsplit(' ', 1)[0]
+
         wikipedia.set_lang("en")
         try:
             summary = wikipedia.summary(query, sentences=sentences, auto_suggest=True)
@@ -220,19 +221,65 @@ def _get_reranker():
     return _reranker
 
 
-# Stage 1 — Query Generation (rule-based, no LLM call — fast inside the timer it must be)
+# Stage 1 — Query Generation
+_QUERY_GEN_SYSTEM = (
+    "You are a search-query generator. "
+    "Given a quiz question and its options, return a JSON object with exactly this structure:\n"
+    '{"queries": ["query1", "query2", "query3"]}\n'
+    "The three queries must be distinct, complementary Wikipedia/web search queries "
+    "that together cover the key concepts needed to answer the question. "
+    "Return raw JSON only — no markdown, no explanation."
+)
+
+# Phrases that signal document-specific questions — mislead web search they do
+_ARTICLE_REF_RE = re.compile(
+    r"\b(according to (the )?(article|text|passage|paragraph|excerpt))\b",
+    re.I,
+)
+
+
 def _generate_search_queries(question_text: str, option_texts: list) -> list:
     """
-    Build search queries from question text and options without an LLM call.
-    Instant this is; 20 seconds wasted on generation, we avoid.
+    Ask the LLM for three search queries, with robust fallback parsing.
+    Strip document-reference phrases first; mislead the search, they would.
     """
-    queries = [question_text]
-    # Add question+option combos for the first two options as complementary queries
-    for opt in option_texts[:2]:
-        words = opt.split()
-        if len(words) >= 2:
-            queries.append(f"{question_text} {opt}")
-    return queries[:3]
+    # BUG-03: strip "according to the article/text/passage" phrases
+    clean_q = _ARTICLE_REF_RE.sub("", question_text).strip(" ,;")
+    if clean_q != question_text:
+        print(f"  [RAG-Science] Document-reference stripped: '{question_text[:60]}...'")
+
+    opts_str = ", ".join(f'"{t}"' for t in option_texts)
+    user_msg = f'Question: {clean_q}\nOptions: [{opts_str}]'
+
+    t_llm = time.time()
+    try:
+        raw = generate_answer(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=80)
+        print(f"  [RAG-Science] Query LLM output ({time.time()-t_llm:.1f}s): {raw[:150]!r}")
+
+        # Primary: JSON parse
+        json_match = re.search(r'\{.*?"queries".*?\}', raw, re.S)
+        if json_match:
+            data = json.loads(json_match.group())
+            queries = [q.strip() for q in data.get("queries", []) if q.strip()]
+            if queries:
+                return queries[:3]
+
+        # Fallback: line-by-line extraction when JSON is malformed
+        lines = raw.splitlines()
+        queries = []
+        for line in lines:
+            line = re.sub(r'^[\d\.\-\*\)\s]+', '', line).strip().strip('"').strip("'")
+            if 5 <= len(line) <= 120:
+                queries.append(line)
+        if queries:
+            return queries[:3]
+
+    except Exception as exc:
+        print(f"  [RAG-Science] Query generation failed: {exc}")
+
+    # Last-resort fallback: truncated question text so Wikipedia doesn't choke
+    fallback = clean_q[:80].rsplit(' ', 1)[0]
+    return [fallback]
 
 
 # Stage 2 — Parallel Multi-Source Retrieval
@@ -297,22 +344,23 @@ def rag_science(question_text: str, option_texts: list = None) -> str:
     if option_texts is None:
         option_texts = []
 
-    t_start = time.time()
-
-    # Stage 1: generate diverse queries (LLM call — kept to 60 tokens for speed)
+    # Stage 1: generate diverse queries
+    t1 = time.time()
     queries = _generate_search_queries(question_text, option_texts)
-    print(f"  [RAG-Science] Queries generated in {time.time()-t_start:.1f}s: {queries}")
+    print(f"  [RAG-Science] Stage1 query-gen: {time.time()-t1:.1f}s → {queries}")
 
     # Stage 2: parallel multi-source retrieval
+    t2 = time.time()
     snippets = _retrieve_parallel(queries)
-    print(f"  [RAG-Science] {len(snippets)} snippets in {time.time()-t_start:.1f}s total")
+    print(f"  [RAG-Science] Stage2 retrieval: {time.time()-t2:.1f}s → {len(snippets)} snippets")
 
     if not snippets:
         return ""
 
     # Stage 3: re-rank and return top context
+    t3 = time.time()
     context = _rerank(question_text, snippets, top_k=3)
-    print(f"  [RAG-Science] RAG complete in {time.time()-t_start:.1f}s")
+    print(f"  [RAG-Science] Stage3 reranking: {time.time()-t3:.1f}s")
     return context
 
 
