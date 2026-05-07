@@ -62,10 +62,10 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     print("Ready to answer, the model is.")
 
 
-def generate_answer(system_prompt: str, user_prompt: str) -> str:
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 10) -> str:
     """
-    Generate a fast answer — 10 new tokens, greedy decoding.
-    Speed requires this, the 30-second timer does.
+    Generate an answer with greedy decoding.
+    Speed requires few tokens for most tasks; maths needs more for CoT.
     """
     if _pipe is None:
         raise RuntimeError("Load the model first, you must. Call load_model().")
@@ -76,7 +76,7 @@ def generate_answer(system_prompt: str, user_prompt: str) -> str:
     ]
     outputs = _pipe(
         messages,
-        max_new_tokens=10,
+        max_new_tokens=max_new_tokens,
         do_sample=False,
         return_full_text=False,
     )
@@ -108,10 +108,11 @@ SYSTEM_PROMPTS = {
         "(0, 1, 2, or 3) of the best answer. No explanation needed."
     ),
     COMP_MATHS: (
-        "A mathematician you are. "
-        "Think step by step through the calculation, then reply with ONLY the digit "
-        "(0, 1, 2, or 3) that matches the correct numerical answer among the options. "
-        "Show your chain-of-thought before the final digit."
+        "You are a precise mathematician. "
+        "Work through the problem step by step, showing all intermediate calculations. "
+        "After your working, output the answer on the very last line in exactly this format:\n"
+        "ANSWER: <digit>\n"
+        "where <digit> is 0, 1, 2, or 3 — the index of the correct option. No other text after that line."
     ),
 }
 
@@ -245,39 +246,78 @@ def _eval_expr(expr: str) -> Optional[float]:
         return None
 
 
+_WORD_NUMBERS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "half": 0.5, "quarter": 0.25, "third": 1/3, "eighth": 0.125,
+}
+
+
+def _word_to_num(text: str) -> str:
+    """Replace English word-numbers with digits."""
+    for word, val in _WORD_NUMBERS.items():
+        text = re.sub(rf"\b{word}\b", str(val), text, flags=re.I)
+    return text
+
+
 def rag_maths(question_text: str) -> str:
     """
     Extract and compute mathematical expressions from the question.
-    No internet needed — calculate, we shall!
+    Handles percentages, roots, powers, factorials, combinations, word numbers,
+    and falls back to sympy for general symbolic evaluation.
     """
     results = []
+    q = _word_to_num(question_text)
 
-    # Percentage patterns: "X% of Y", "X percent of Y"
-    pct_match = re.findall(r"(\d+\.?\d*)\s*%\s*of\s*(\d+\.?\d*)", question_text, re.I)
-    for pct, total in pct_match:
+    # Percentage: "X% of Y" or "X percent of Y"
+    for pct, total in re.findall(r"(\d+\.?\d*)\s*(?:%|percent)\s*of\s*(\d+\.?\d*)", q, re.I):
         val = float(pct) / 100 * float(total)
         results.append(f"{pct}% of {total} = {val}")
 
-    # Square root patterns: "sqrt(X)", "square root of X", "√X"
-    sqrt_match = re.findall(r"(?:sqrt\(|square root of|√)\s*(\d+\.?\d*)\)?", question_text, re.I)
-    for n in sqrt_match:
-        val = math.sqrt(float(n))
-        results.append(f"sqrt({n}) = {val:.6f}")
+    # Square root: "sqrt(X)", "square root of X", "√X"
+    for n in re.findall(r"(?:sqrt\s*\(|square\s+root\s+of|√)\s*(\d+\.?\d*)\)?", q, re.I):
+        results.append(f"sqrt({n}) = {math.sqrt(float(n)):.6f}")
 
-    # Power patterns: "X^Y", "X**Y", "X to the power of Y"
-    pow_match = re.findall(r"(\d+\.?\d*)\s*(?:\^|\*\*|to the power of)\s*(\d+\.?\d*)", question_text, re.I)
-    for base, exp in pow_match:
-        val = float(base) ** float(exp)
-        results.append(f"{base}^{exp} = {val}")
+    # Power: "X^Y", "X**Y", "X to the power of Y"
+    for base, exp in re.findall(r"(\d+\.?\d*)\s*(?:\^|\*\*|to\s+the\s+power\s+of)\s*(\d+\.?\d*)", q, re.I):
+        results.append(f"{base}^{exp} = {float(base) ** float(exp)}")
 
-    # Generic arithmetic expressions: extract numbers with operators
-    arith_match = re.findall(r"(\d+\.?\d*\s*[\+\-\*\/]\s*\d+\.?\d*(?:\s*[\+\-\*\/]\s*\d+\.?\d*)*)", question_text)
-    for expr in arith_match:
+    # Factorial: "X!" or "factorial of X" or "X factorial"
+    for n in re.findall(r"(\d+)\s*!", q):
+        val = math.factorial(int(n))
+        results.append(f"{n}! = {val}")
+    for n in re.findall(r"factorial\s+of\s+(\d+)", q, re.I):
+        results.append(f"{n}! = {math.factorial(int(n))}")
+
+    # Combinations nCr: "n choose r", "C(n,r)", "nCr"
+    for n, r in re.findall(r"(\d+)\s*[Cc](?:hoose|r)?\s*(\d+)", q):
+        val = math.comb(int(n), int(r))
+        results.append(f"C({n},{r}) = {val}")
+    for n, r in re.findall(r"[Cc]\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", q):
+        val = math.comb(int(n), int(r))
+        results.append(f"C({n},{r}) = {val}")
+
+    # Inline arithmetic: e.g. "3 + 4 * 2"
+    for expr in re.findall(r"(\d+\.?\d*(?:\s*[\+\-\*\/]\s*\d+\.?\d*)+)", q):
         val = _eval_expr(expr.replace(" ", ""))
         if val is not None:
             results.append(f"{expr.strip()} = {val}")
 
-    # A hint we return, even if no pattern found
+    # sympy fallback for general symbolic expressions
+    if not results:
+        try:
+            import sympy
+            # Strip non-math text; attempt to parse as expression
+            cleaned = re.sub(r"[^0-9\+\-\*\/\^\(\)\.\s]", " ", q).strip()
+            cleaned = re.sub(r"\s+", " ", cleaned)
+            if re.search(r"\d", cleaned):
+                val = sympy.sympify(cleaned.replace("^", "**"))
+                results.append(f"sympy({cleaned}) = {float(val):.6f}")
+        except Exception:
+            pass
+
     if not results:
         return "No direct computation extracted. Reason carefully, you must."
     return "Computed results: " + "; ".join(results)
@@ -295,6 +335,13 @@ def extract_answer_id(text: str, num_options: int = 4) -> int:
     Robust extraction of a digit answer from model output.
     Find the answer, we must — default to 0 if lost we are.
     """
+    # Priority 0: explicit structured tag "ANSWER: X"
+    tag_match = re.search(r"\bANSWER\s*:\s*([0-3])\b", text, re.I)
+    if tag_match:
+        idx = int(tag_match.group(1))
+        if idx < num_options:
+            return idx
+
     # Priority 1: standalone digit within valid range
     digit_matches = re.findall(r"\b([0-3])\b", text)
     for m in digit_matches:
@@ -405,7 +452,8 @@ def play_game(game, comp_id: int) -> dict:
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking, the model is...")
         t1 = time.time()
-        raw_output = generate_answer(system_prompt, user_prompt)
+        tokens = 200 if comp_id == COMP_MATHS else 10
+        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
         llm_elapsed = time.time() - t1
 
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))
