@@ -80,8 +80,11 @@ def generate_answer(system_prompt: str, user_prompt: str) -> str:
         do_sample=False,
         return_full_text=False,
     )
-    # The last assistant turn, we extract
-    return outputs[0]["generated_text"][-1]["content"].strip()
+    # String or message list, both we handle
+    result = outputs[0]["generated_text"]
+    if isinstance(result, str):
+        return result.strip()
+    return result[-1]["content"].strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
