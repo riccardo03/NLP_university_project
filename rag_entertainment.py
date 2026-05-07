@@ -24,10 +24,14 @@ def rag_entertainment(query: str, num_results: int = 3,
     Search DuckDuckGo for entertainment context.
     If generate_answer_fn is provided, distil query to ≤10 focused words first.
     """
-    # Strip document-reference phrases before distillation
-    clean_query = _ARTICLE_REF_RE.sub('', query).strip()
-    if clean_query != query:
-        print(f"  [RAG-Entertainment] Document-reference stripped: '{query[:60]}...'")
+    # Document-reference questions can't be answered by web search — the article
+    # isn't online. Return empty so the model falls back to its own knowledge
+    # rather than being misled by random DDG results.
+    if _ARTICLE_REF_RE.search(query):
+        print(f"  [RAG-Entertainment] Article-reference question — skipping DDG search.")
+        return ""
+
+    clean_query = query
 
     # Stage 1: optional LLM query distillation
     ddg_query = clean_query
