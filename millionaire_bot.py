@@ -8,6 +8,7 @@ import warnings
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline
+from transformers import logging as transformers_logging
 
 from rag_entertainment import rag_entertainment
 from rag_history      import rag_history
@@ -15,6 +16,7 @@ from rag_science      import rag_science, warmup_reranker
 from rag_maths        import rag_maths
 
 warnings.filterwarnings("ignore")
+transformers_logging.set_verbosity_error()
 
 COMP_ENTERTAINMENT      = 0
 COMP_HISTORY_POLITICS   = 1

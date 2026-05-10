@@ -24,10 +24,6 @@ _QUERY_GEN_SYSTEM = (
     "Return ONLY the query string — no explanation, no punctuation at the end."
 )
 
-# Heuristic: an option is a "named entity" worth a Wikipedia lookup if it starts
-# with an uppercase letter and is not a plain number or very short word.
-_ENTITY_RE = re.compile(r'^[A-Z][A-Za-z0-9 \-\'\.]{2,}$')
-
 
 def _wiki(query: str, sentences: int = 5) -> str:
     """Fetch a Wikipedia summary; returns '' on any failure."""
@@ -56,15 +52,15 @@ def rag_entertainment(query: str, num_results: int = 3,
     """
     Wikipedia + DuckDuckGo RAG for entertainment quiz questions.
 
+
     Pipeline:
-      1. Skip document-reference questions (no web source can substitute).
-      2. [Optional] Distil the query with an LLM, using options as guidance.
-      3a. Wikipedia — one lookup for the main query + one per named-entity option.
-      3b. DuckDuckGo — one search for the main query + one per option.
-      4. Filter snippets to those that mention at least one option.
-      5. Return up to 2000 characters of deduplicated context.
+        1. Skip document-reference questions (no web source can substitute).
+        2. [Optional] Distil the query with an LLM, using options as guidance.
+        3a. Wikipedia — main query lookup.
+        3b. DuckDuckGo — main query search.
+        4. Filter snippets to those that mention at least one option.
+        5. Return up to 2000 characters of deduplicated context.
     """
-    # ------------------------------------------------------------------ #
     # Guard: document-reference questions can't be answered by web search  #
     # ------------------------------------------------------------------ #
     if _ARTICLE_REF_RE.search(query):
