@@ -147,7 +147,8 @@ def rag_entertainment(query: str, num_results: int = 3,
             futures.append(pool.submit(_fetch_ddg_main))
 
             for opt in option_texts:
-                futures.append(pool.submit(_fetch_ddg_option, opt))
+                if len(opt.split()) <= 4:
+                    futures.append(pool.submit(_fetch_ddg_option, opt))
 
             for fut in concurrent.futures.as_completed(futures, timeout=15):
                 try:
