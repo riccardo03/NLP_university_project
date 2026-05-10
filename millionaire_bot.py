@@ -43,7 +43,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         torch_dtype=torch.float16,
         trust_remote_code=True,
     )
-
+    _model.config.max_length = None
     _model.generation_config = GenerationConfig(
          pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
          eos_token_id=_tokenizer.eos_token_id,

@@ -70,9 +70,6 @@ def rag_entertainment(query: str, num_results: int = 3,
     if _ARTICLE_REF_RE.search(query):
         print("  [RAG-Entertainment] Article-reference question — skipping search.")
         return ""
-
-    option_texts = option_texts or []
-
     # ------------------------------------------------------------------ #
     # Stage 1: LLM query distillation                                      #
     # ------------------------------------------------------------------ #
@@ -124,16 +121,6 @@ def rag_entertainment(query: str, num_results: int = 3,
                     results.append(f"[{title}] {body}" if title else body)
         return results
 
-    def _fetch_ddg_option(opt: str):
-        from ddgs import DDGS
-        combined = f"{ddg_query} {opt}"
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(combined, max_results=2, timeout=6):
-                body = r.get("body", "")
-                if body:
-                    results.append(f"[search: {opt!r}] {body}")
-        return results
 
     # ------------------------------------------------------------------ #
     # Stage 3: run everything in parallel                                  #
@@ -141,14 +128,10 @@ def rag_entertainment(query: str, num_results: int = 3,
     futures = []
     try:
         # +2 for main wiki + main DDG; +len(entity_options) wiki; +len(options) DDG
-        max_workers = 2 + len(option_texts)
+        max_workers = 2
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures.append(pool.submit(_fetch_wiki_main))
             futures.append(pool.submit(_fetch_ddg_main))
-
-            for opt in option_texts:
-                if len(opt.split()) <= 4:
-                    futures.append(pool.submit(_fetch_ddg_option, opt))
 
             for fut in concurrent.futures.as_completed(futures, timeout=15):
                 try:
