@@ -94,7 +94,7 @@ def warmup_models() -> None:
     Force-load all lazily-initialized models before the game timer starts.
     Warm the cross-encoder now,  we avoid cold timeouts later.
     """
-    print("  [Warmup] Loading cross-encoder, before game starts...")
+    print("  [Warmup] Loading cross-encoder...")
     warmup_reranker()
     print("  [Warmup] All models ready.")
 
@@ -267,7 +267,7 @@ def play_game(game, comp_id: int) -> dict:
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking...")
         t1 = time.time()
-        tokens = 400 
+        tokens = 200 
 
         raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))
