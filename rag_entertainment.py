@@ -29,10 +29,6 @@ _QUERY_GEN_SYSTEM = (
 _ENTITY_RE = re.compile(r'^[A-Z][A-Za-z0-9 \-\'\.]{2,}$')
 
 
-def _looks_like_entity(text: str) -> bool:
-    return bool(_ENTITY_RE.match(text.strip()))
-
-
 def _wiki(query: str, sentences: int = 5) -> str:
     """Fetch a Wikipedia summary; returns '' on any failure."""
     try:
@@ -114,12 +110,6 @@ def rag_entertainment(query: str, num_results: int = 3,
     def _fetch_wiki_main():
         return _wiki(ddg_query)
 
-    def _fetch_wiki_option(opt: str):
-        result = _wiki(opt, sentences=3)          # shorter summary per option
-        return f"[wiki: {opt!r}] {result}" if result else ""
-
-    entity_options = [o for o in option_texts if _looks_like_entity(o)]
-
     # ------------------------------------------------------------------ #
     # Stage 2b: DDG — main query + one search per option                   #
     # ------------------------------------------------------------------ #
@@ -151,13 +141,10 @@ def rag_entertainment(query: str, num_results: int = 3,
     futures = []
     try:
         # +2 for main wiki + main DDG; +len(entity_options) wiki; +len(options) DDG
-        max_workers = 2 + len(entity_options) + len(option_texts)
+        max_workers = 2 + len(option_texts)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures.append(pool.submit(_fetch_wiki_main))
             futures.append(pool.submit(_fetch_ddg_main))
-
-            for opt in entity_options:
-                futures.append(pool.submit(_fetch_wiki_option, opt))
 
             for opt in option_texts:
                 futures.append(pool.submit(_fetch_ddg_option, opt))

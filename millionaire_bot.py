@@ -40,7 +40,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
-        dtype=torch.float16,
+        torch_dtype=torch.float16,
         trust_remote_code=True,
     )
 
@@ -251,7 +251,7 @@ def play_game(game, comp_id: int) -> dict:
         option_texts = [opt.text for opt in question.options]
 
         # Retrieve context from the appropriate RAG tool
-        print("  [RAG] Searching for CONTEXT...")
+        print("  [RAG] Searching for context...")
         t0 = time.time()
         context = get_context(comp_id, question.text, option_texts)
         rag_elapsed = time.time() - t0
