@@ -116,7 +116,7 @@ def rag_entertainment(query: str, num_results: int = 3,
 
     def _fetch_wiki_option(opt: str):
         result = _wiki(opt, sentences=3)          # shorter summary per option
-        return f"[{opt}] {result}" if result else ""
+        return f"[wiki: {opt!r}] {result}" if result else ""
 
     entity_options = [o for o in option_texts if _looks_like_entity(o)]
 
@@ -142,7 +142,7 @@ def rag_entertainment(query: str, num_results: int = 3,
             for r in ddgs.text(combined, max_results=2, timeout=6):
                 body = r.get("body", "")
                 if body:
-                    results.append(f"[{opt}] {body}")
+                    results.append(f"[search: {opt!r}] {body}")
         return results
 
     # ------------------------------------------------------------------ #

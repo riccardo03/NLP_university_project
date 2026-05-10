@@ -7,7 +7,7 @@ import time
 import warnings
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline
 
 from rag_entertainment import rag_entertainment
 from rag_history      import rag_history
@@ -32,11 +32,6 @@ COMP_NAMES = {
 # Section 2 · Model loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-_model     = None
-_tokenizer = None
-_pipe      = None
-
-
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
 
@@ -48,15 +43,17 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         dtype=torch.float16,
         trust_remote_code=True,
     )
+
+    _model.generation_config = GenerationConfig(
+         pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
+         eos_token_id=_tokenizer.eos_token_id,
+    )
     _pipe = pipeline(
         "text-generation",
         model=_model,
         tokenizer=_tokenizer,
     )
-    _model.generation_config.max_length   = None
-    _model.generation_config.temperature  = None
-    _model.generation_config.top_p        = None
-    _model.generation_config.top_k        = None
+
     print("The model is ready to answer.")
     warmup_models()
 
@@ -79,10 +76,9 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     )
     if do_sample:
         gen_kwargs["temperature"] = temperature
-    # None values cause pipeline warnings — strip them before passing
-    gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+ 
     outputs = _pipe(messages, **gen_kwargs)
-    # String or message list, we handle both
+   
     result = outputs[0]["generated_text"]
     if isinstance(result, str):
         return result.strip()
