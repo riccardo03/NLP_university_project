@@ -105,6 +105,8 @@ SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
         "You are an expert in entertainment, pop culture, movies, music, television, sports, and celebrity culture. "
         "You have encyclopedic knowledge of release dates, awards, chart positions, box office records, and cultural trivia across all decades and regions. "
+        "When the question involves a logical relationship (superset, subset, cause/effect, before/after), "
+        "think step by step about the direction of the relationship before answering. "
         "Given a multiple-choice question and optional context, output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
         "No punctuation, no explanation, no reasoning — just the digit."
     ),
@@ -265,7 +267,7 @@ def play_game(game, comp_id: int) -> dict:
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking...")
         t1 = time.time()
-        tokens = 200 
+        tokens = 400 
 
         raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))

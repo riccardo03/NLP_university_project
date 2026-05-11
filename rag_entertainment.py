@@ -24,15 +24,25 @@ _QUERY_GEN_SYSTEM = (
     "Return ONLY the query string — no explanation, no punctuation at the end."
 )
 
+_SUBJECT_IDENTIFICATION_SYSTEM = (
+    "You are an entertainment expert. "
+    "Given a quiz question about a film, song, artist, or show, "
+    "identify the specific title or subject being referred to, even if not explicitly named. "
+    "Output ONLY the identified subject — no explanation."
+)
 
 def _wiki(query: str, sentences: int = 5) -> str:
     """Fetch a Wikipedia summary; returns '' on any failure."""
     try:
         import wikipedia
-        wiki_q = query if len(query) <= 280 else query[:280].rsplit(" ", 1)[0]
         wikipedia.set_lang("en")
         try:
-            return wikipedia.summary(wiki_q, sentences=sentences, auto_suggest=True)
+            page = wikipedia.page(query, auto_suggest=True)
+            # Cerca il paragrafo più rilevante invece delle prime frasi
+            content = page.content
+            paragraphs = [p for p in content.split("\n") if len(p) > 100]
+            # Restituisci i primi 3 paragrafi rilevanti
+            return "\n\n".join(paragraphs[:3])
         except wikipedia.exceptions.DisambiguationError as e:
             return wikipedia.summary(e.options[0], sentences=sentences)
         except wikipedia.exceptions.PageError:
@@ -72,18 +82,25 @@ def rag_entertainment(query: str, num_results: int = 3,
     ddg_query = query
     if generate_answer_fn is not None:
         try:
-            user_msg = (
+            subject = generate_answer_fn(
+            _SUBJECT_IDENTIFICATION_SYSTEM,
+            query,
+            max_new_tokens=20
+            ).strip()
+        # Usa il soggetto identificato come ancora della query
+            anchored_query = f"{subject} {query}" if subject else query
+        except Exception:
+             anchored_query = query
+        user_msg = (
                 f"Question: {query}\n"
                 f"Possible answers: {', '.join(option_texts)}\n"
                 "Generate a search query to find which answer is correct."
-            ) if option_texts else query
+        ) if option_texts else query
 
-            raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
-            distilled = raw.strip().strip('"').strip("'")
-            if distilled:
-                ddg_query = distilled
-        except Exception:
-            pass
+        raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
+        distilled = raw.strip().strip('"').strip("'")
+        if distilled:
+            ddg_query = distilled
         print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
 
     # ------------------------------------------------------------------ #
