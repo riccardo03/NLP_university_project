@@ -81,28 +81,28 @@ def rag_entertainment(query: str, num_results: int = 3,
     # ------------------------------------------------------------------ #
     ddg_query = query
     if generate_answer_fn is not None:
-        try:
-            subject = generate_answer_fn(
-            _SUBJECT_IDENTIFICATION_SYSTEM,
-            query,
-            max_new_tokens=20
-            ).strip()
-            print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
-        # Usa il soggetto identificato come ancora della query
-            anchored_query = f"{subject} {query}" if subject else query
-        except Exception:
-             anchored_query = query
-        user_msg = (
-                f"Question: {query}\n"
-                f"Possible answers: {', '.join(option_texts)}\n"
-                "Generate a search query to find which answer is correct."
-        ) if option_texts else query
+            try:
+                subject = generate_answer_fn(
+                    _SUBJECT_IDENTIFICATION_SYSTEM,
+                    query,
+                    max_new_tokens=20
+                ).strip()
+                print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
+                anchored_query = f"{subject} {query}" if subject else query
 
-        raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
-        distilled = raw.strip().strip('"').strip("'")
-        if distilled:
-            ddg_query = distilled
-        print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
+                user_msg = (
+                    f"Question: {anchored_query}\n"
+                    f"Possible answers: {', '.join(option_texts)}\n"
+                    "Generate a search query to find which answer is correct."
+                ) if option_texts else anchored_query
+
+                raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
+                distilled = raw.strip().strip('"').strip("'")
+                if distilled:
+                    ddg_query = distilled
+            except Exception:
+                pass
+            print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
