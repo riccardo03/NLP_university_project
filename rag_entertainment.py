@@ -101,7 +101,7 @@ def rag_entertainment(query: str, num_results: int = 3,
     # Stage 2a: Wikipedia — main query + one lookup per named-entity option#
     # ------------------------------------------------------------------ #
     def _fetch_wiki_main():
-        return _wiki(ddg_query)
+        return _wiki(ddg_query, sentences=10)
 
     # ------------------------------------------------------------------ #
     # Stage 2b: DDG — main query + one search per option                   #
@@ -114,7 +114,7 @@ def rag_entertainment(query: str, num_results: int = 3,
                 title = r.get("title", "")
                 body  = r.get("body",  "")
                 if body:
-                    results.append(f"[{title}] {body}" if title else body)
+                    results.append(f"{body} (fonte: {title})" if title else body)
         return results
 
 
@@ -154,4 +154,4 @@ def rag_entertainment(query: str, num_results: int = 3,
         snippets = relevant if relevant else snippets
 
     context = "\n\n".join(snippets)
-    return context[:2000] if context else ""
+    return context[:4000] if context else ""
