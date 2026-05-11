@@ -101,6 +101,7 @@ def rag_entertainment(query: str, num_results: int = 3,
                 if distilled:
                     ddg_query = distilled
             except Exception:
+                print("  [RAG-Entertainment] Query distillation failed, using original query.")
                 pass
             print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
 
