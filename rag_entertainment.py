@@ -100,9 +100,8 @@ def rag_entertainment(query: str, num_results: int = 3,
                 distilled = raw.strip().strip('"').strip("'")
                 if distilled:
                     ddg_query = distilled
-            except Exception:
-                print("  [RAG-Entertainment] Query distillation failed, using original query.")
-                pass
+            except Exception as e:
+                print(f"  [RAG-Entertainment] Query distillation failed: {e}")
             print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
 
     # ------------------------------------------------------------------ #
