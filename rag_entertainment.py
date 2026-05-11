@@ -87,6 +87,7 @@ def rag_entertainment(query: str, num_results: int = 3,
             query,
             max_new_tokens=20
             ).strip()
+            print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
         # Usa il soggetto identificato come ancora della query
             anchored_query = f"{subject} {query}" if subject else query
         except Exception:
