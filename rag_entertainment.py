@@ -1,15 +1,6 @@
-"""
-RAG pipeline for the Entertainment competition.
-Wikipedia first, DuckDuckGo to supplement.
-"""
 
 import re
-import concurrent.futures
 
-_ARTICLE_REF_RE = re.compile(
-    r'\b(according to|as described in|as stated in|in his own words|based on|per) '
-    r'(the article|the text|the passage|the excerpt)\b', re.I
-)
 _LOW_QUALITY_SIGNALS = [
     r'\d{4}\s*[·•]\s',   # "Jun 12, 2018 ·" — dated blog format
     r'click here',
@@ -19,8 +10,8 @@ _LOW_QUALITY_SIGNALS = [
     r'\.\.\.read',
     r'youtube\.com',
     r'goo\.gl',
-    r'fandom\.com',    
-    r'wikia\.com', 
+    r'fandom\.com',
+    r'wikia\.com',
 ]
 
 _TRUSTED_DOMAINS = {
@@ -34,86 +25,135 @@ _TRUSTED_DOMAINS = {
     "billboard.com",
 }
 
-_QUERY_GEN_SYSTEM = (
-    "You are a search-query generator for an entertainment trivia bot. "
-    "Given a question (already anchored to its subject), output a SHORT search query "
-    "of 3 to 6 words that will retrieve a Wikipedia or web page "
-    "WHERE THE ANSWER CAN BE READ. "
-    "\n\n"
-    "Rules:\n"
-    "- Target the TOPIC, not the answer. Generate a query to find the right PAGE, "
-    "not to pre-encode the answer.\n"
-    "- 3 to 6 words maximum. Shorter is better.\n"
-    "- Keep: proper nouns, titles, years, and 1-2 context words (biography, filmography, "
-    "discography, career, history, relationship).\n"
-    "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
-    "- Output ONLY the query string. No punctuation at the end. No explanation.\n"
-    "Always put a space between every word. Never merge words together.\n"
-    "\n"
-    "Examples:\n"
-    "Question: Katharine Hepburn career spanning six decades variety of roles → "
-    "Katharine Hepburn versatility roles career\n"
-    "Question: James Cameron James Cameron primary reason switched physics English → "
-    "James Cameron biography early career\n"
-    "Question: The Godfather The Godfather director who directed → "
-    "The Godfather 1972 film\n"
-    "Question: Michael Jackson Thriller In what year did Michael Jackson release Thriller → "
-    "Michael Jackson Thriller album release\n"
-    "Question: 12-bar blues How does the blues form relate to 12-bar blues structure → "
-    "12-bar blues music theory\n"
-    "Question: Academy Awards Which film won Best Picture at the 2020 Academy Awards → "
-    "Academy Awards 2020 Best Picture\n"
-)
-
-_SUBJECT_IDENTIFICATION_SYSTEM = (
-    "You are a search assistant for an entertainment quiz bot. "
-    "Given a quiz question, extract the PRIMARY named entity — "
-    "the specific person, film, song, album, TV show, award, character, or event "
-    "that the question is ABOUT. "
-    "\n\n"
-    "Rules:\n"
-    "- If the question is about ONE entity, output just that entity (1-4 words).\n"
-    "- If the question asks about the RELATIONSHIP between two entities, "
-    "output BOTH separated by ' AND ': e.g. 'Hey Joe AND Purple Haze'\n"
-    "- If the question is about a concept with NO named entity, output: NONE\n"
-    "- Never output a full sentence. Never explain.\n"
-    "Examples:\n"
-    "Q: What was the primary reason James Cameron switched from physics to English? → James Cameron\n"
-    "Q: Who directed The Godfather? → The Godfather\n"
-    "Q: How does the blues form relate to the 12-bar structure? → NONE\n"
-    "Q: Which actor played Tony Stark in the Marvel films? → Tony Stark Marvel\n"
-    "Q: In what year did Michael Jackson release Thriller? → Michael Jackson Thriller\n"
-)
-
 _STOP_WORDS = {
     "what", "when", "which", "where", "does", "have", "this",
     "that", "from", "with", "about", "into", "their", "there",
-    "been", "were", "would", "could", "should", "according"
+    "been", "were", "would", "could", "should", "according",
+    "following", "best", "describes", "describe", "primary",
+    "fundamental", "principle", "term", "following",
 }
 
-_SUBJECT_TRIGGERS = re.compile(
-    r'\b(film|movie|song|album|series|show|band|actor|actress|director|artist|character)\b',
-    re.I
+_QUERY_DECISION_SYSTEM = (
+    "You are a search assistant for an entertainment trivia bot. "
+    "Given a multiple-choice quiz question, decide whether web search is needed "
+    "and if so, what to search for. "
+    "\n\n"
+    "Output EXACTLY one of these three formats and nothing else:\n"
+    "\n"
+    "SKIP\n"
+    "  — Use when the question references source material that cannot be found "
+    "online: 'according to the article', 'as described in the text', "
+    "'as mentioned in the article', 'as stated', 'based on the passage', "
+    "'in his/her own words', OR when the question says 'the film/show/book' "
+    "without naming it (e.g. 'the film portrays...' with no film title given).\n"
+    "\n"
+    "PARAMETRIC\n"
+    "  — Use when the question is about a general concept or definition with "
+    "no specific named entity (e.g. 'what is sonata form', 'define jazz fusion', "
+    "'which term describes a melody'). The LLM can answer from its own knowledge.\n"
+    "\n"
+    "SEARCH: <query>\n"
+    "  — Use for all other questions. <query> must be 3-6 words, targeting the "
+    "topic not the answer.\n"
+    "\n"
+    "Rules for SEARCH queries:\n"
+    "- Use proper names and 1-2 context words (biography, career, filmography, "
+    "history, relationship, album, film).\n"
+    "- For relationship questions between TWO named entities, include both names.\n"
+    "- Include specific years or titles when they narrow which page is needed.\n"
+    "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
+    "- Drop: consequence words (impact, legacy, mental health, effect, result, "
+    "controversy, reason, primary).\n"
+    "- Always put a space between every word. Never merge words.\n"
+    "- Never include non-English characters.\n"
+    "\n"
+    "Examples:\n"
+    "Q: What was the primary reason James Cameron switched from physics to English? "
+    "→ SEARCH: James Cameron biography early career\n"
+    "Q: According to the article, what does the author argue? → SKIP\n"
+    "Q: Which term describes the way the film portrays antebellum life? → SKIP\n"
+    "Q: Which of the following best describes the fundamental principle of sonata "
+    "form? → PARAMETRIC\n"
+    "Q: How does 'Hey Joe' relate to 'Purple Haze'? "
+    "→ SEARCH: Hey Joe Purple Haze Jimi Hendrix\n"
+    "Q: What was Kanye West's 2002 car accident? "
+    "→ SEARCH: Kanye West 2002 car accident\n"
+    "Q: Which term best describes Jack Nicholson's relationship with his mother "
+    "as mentioned in the article? → SKIP\n"
+    "Q: What is jazz fusion? → PARAMETRIC\n"
+    "Q: Which of the following best describes the significance of the Tramp "
+    "character in Chaplin's films? "
+    "→ SEARCH: Charlie Chaplin Tramp character significance\n"
+    "Q: What was the primary reason Spielberg decided to direct Schindler's List? "
+    "→ SEARCH: Spielberg Schindler List motivation Jewish heritage\n"
+    "Q: How did Taylor's relationship with Richard Burton impact her public image? "
+    "→ SEARCH: Elizabeth Taylor Richard Burton relationship\n"
+    "Q: What is Mr. Bean's profession in the first film adaptation? "
+    "→ SEARCH: Bean 1997 film Mr Bean\n"
+    "Q: Which of Hitchcock's films is known for the dolly zoom effect? "
+    "→ SEARCH: Hitchcock dolly zoom Vertigo\n"
+    "Q: What is the primary instrument played by The Edge in U2? "
+    "→ SEARCH: The Edge U2 guitarist\n"
+    "Q: Which of the following best describes the fundamental principle of "
+    "classical Hollywood continuity editing? → PARAMETRIC\n"
+    "Q: What was the primary reason for the Beatles' decision to retire from "
+    "live performances in 1966? "
+    "→ SEARCH: Beatles 1966 retire live performances\n"
 )
 
-_PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
-_POSSESSIVE_PROPER_RE = re.compile(r"\b([A-Z][a-z]{2,})'s\b")
-_SINGLE_NAME_RE = re.compile(
-    r'\b(?:between|behind|describes|about|by|for|of|with|from|in|on)\s+([A-Z][a-z]{2,})\b'
-)
 
-def _needs_subject_id(question: str) -> bool:
-    if _SUBJECT_TRIGGERS.search(question):
-        return True
-    if _PROPER_NOUN_RE.findall(question):
-        return True
-    if _POSSESSIVE_PROPER_RE.findall(question):
-        return True
-    if _SINGLE_NAME_RE.findall(question):
-        return True
-    return False
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sanitize_query(query: str) -> str:
+    """Fix common LLM query generation artifacts."""
+    # fix missing spaces before capital letters: "earlyCareer" → "early Career"
+    query = re.sub(r'([a-z])([A-Z])', r'\1 \2', query)
+    # remove non-ASCII characters (Chinese, Arabic, etc.)
+    query = re.sub(r'[^\x00-\x7F]+', ' ', query)
+    # normalize multiple spaces
+    query = re.sub(r'\s+', ' ', query).strip()
+    return query
+
+
+def _get_search_decision(query: str, generate_answer_fn) -> tuple[str, str]:
+    """
+    Single LLM call that decides: SKIP / PARAMETRIC / SEARCH: <query>
+    Returns (decision, search_query).
+    """
+    try:
+        raw = generate_answer_fn(
+            _QUERY_DECISION_SYSTEM,
+            f"Q: {query}",
+            max_new_tokens=20
+        ).strip()
+
+        upper = raw.upper()
+
+        if upper.startswith("SKIP"):
+            return "SKIP", ""
+        elif upper.startswith("PARAMETRIC"):
+            return "PARAMETRIC", ""
+        elif upper.startswith("SEARCH:"):
+            search_query = _sanitize_query(raw[7:].strip())
+            if search_query and len(search_query) > 2:
+                return "SEARCH", search_query
+            else:
+                # malformed SEARCH output — fall back to raw question
+                return "SEARCH", query
+        else:
+            # unexpected format — treat entire output as query
+            search_query = _sanitize_query(raw)
+            return "SEARCH", search_query if search_query else query
+
+    except Exception as e:
+        print(f"  [RAG-Entertainment] Decision LLM failed: {e}")
+        return "SEARCH", query
+
 
 def _is_quality_snippet(text: str, url: str = "") -> bool:
+    """Return False for snippets from low-quality or unreliable sources."""
     if not text or len(text.strip()) < 80:
         return False
 
@@ -122,7 +162,7 @@ def _is_quality_snippet(text: str, url: str = "") -> bool:
         if re.search(pattern, text_lower):
             return False
 
-    # fast-pass trusted domains
+    # fast-pass trusted domains regardless of content
     if url:
         domain = re.search(r'https?://(?:www\.)?([^/]+)', url)
         if domain and any(t in domain.group(1) for t in _TRUSTED_DOMAINS):
@@ -131,23 +171,28 @@ def _is_quality_snippet(text: str, url: str = "") -> bool:
     return True
 
 
-
 def _wiki(query: str, sentences: int = 5) -> str:
-    """Fetch a Wikipedia summary; returns '' on any failure."""
+    """
+    Fetch Wikipedia content: summary + first 6 substantive paragraphs.
+    Returns empty string on any failure.
+    """
     try:
         import wikipedia
         wikipedia.set_lang("en")
         try:
             page = wikipedia.page(query, auto_suggest=True)
             summary = wikipedia.summary(query, sentences=sentences, auto_suggest=True)
+
+            # deeper paragraphs cover: early life, career details,
+            # production notes, legacy, achievements — not just the intro
             paragraphs = [
                 p.strip() for p in page.content.split("\n")
                 if len(p.strip()) > 100
             ]
-            extra = "\n\n".join(paragraphs[:4])
+            extra = "\n\n".join(paragraphs[:6])
 
-            combined = f"{summary}\n\n{extra}"
-            return combined[:3000]
+            return f"{summary}\n\n{extra}"[:4000]
+
         except wikipedia.exceptions.DisambiguationError as e:
             return wikipedia.summary(e.options[0], sentences=sentences)
         except wikipedia.exceptions.PageError:
@@ -155,91 +200,75 @@ def _wiki(query: str, sentences: int = 5) -> str:
     except Exception:
         return ""
 
+
 def _wiki_is_useful(text: str) -> bool:
-    """
-    Return True if the Wikipedia result is substantial enough to use.
-    Filters out disambiguation pages, stubs, and empty results.
-    """
+    """Return True if Wikipedia result is substantial and not a disambiguation page."""
     if not text or len(text.strip()) < 200:
         return False
     if "may refer to:" in text.lower():
         return False
     return True
 
+
 def _extract_keywords(text: str) -> list[str]:
+    """Extract content words of 4+ chars, excluding stop words."""
     words = re.findall(r'\b[a-z]{4,}\b', text.lower())
     return [w for w in words if w not in _STOP_WORDS]
+
 
 def _is_relevant(snippet: str, question: str) -> bool:
     keywords = _extract_keywords(question)
     if not keywords:
         return True
+
     snippet_lower = snippet.lower()
-    
-    # Check quoted titles first — if question names a specific work,
-    # that work must appear in the context
+
+    # check 1: quoted titles
     quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", question)
     for match in quoted:
         title = (match[0] or match[1]).lower()
         if len(title) > 3 and title not in snippet_lower:
             return False
-    
+
+    # check 2: year anchoring
+    years = re.findall(r'\b(19[0-9]{2}|20[0-9]{2})\b', question)
+    if years:
+        if not any(year in snippet_lower for year in years):
+            return False
+
+    # check 3: keyword overlap
     matches = sum(1 for kw in keywords if kw in snippet_lower)
     return matches >= 2
 
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
     """
-    Wikipedia + DuckDuckGo RAG for entertainment quiz questions.
+    Pipeline:
+        1. Single LLM call → SKIP / PARAMETRIC / SEARCH: <query>
+        2. Wikipedia first; DDG if Wikipedia misses or is irrelevant
+        3. Quality filter on DDG snippets
+        4. Relevance filter on all snippets before returning
     """
-    if _ARTICLE_REF_RE.search(query):
-        print("  [RAG-Entertainment] Article-reference question — skipping search.")
-        return ""
-    # ------------------------------------------------------------------ #
-    # Stage 1: LLM query distillation                                      #
-    # ------------------------------------------------------------------ #
-    ddg_query = query
-    if generate_answer_fn is not None and _needs_subject_id(query):
-            try:
-                subject = generate_answer_fn(
-                    _SUBJECT_IDENTIFICATION_SYSTEM,
-                    f"Q: {query}",
-                    max_new_tokens=15
-                ).strip()
-                
-                if subject.upper() == "NONE" or len(subject) < 3:
-                     print("  [RAG-Entertainment] No subject identified, using raw query.")
-                     ddg_query = query
 
-                elif " AND " in subject.upper():
-    # relationship question — use both entities as the search anchor
-                     parts = re.split(r'\s+AND\s+', subject, flags=re.I)
-                     combined = " ".join(p.strip() for p in parts)
-                     print(f"  [RAG-Entertainment] Multi-entity subject: {parts}")
-                     ddg_query = f"{combined} {query}"[:120]
-                else:
-                     subject = subject.strip('"').strip("'")
-                     print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
-                     anchored_query = f"{subject} {query}"[:120]
-                     user_msg = f"Question: {anchored_query}"
-                     raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=15)
-                     distilled = raw.strip().strip('"').strip("'")
-                     if distilled and len(distilled) > 3:
-                         ddg_query = distilled
-                     else: 
-                         ddg_query = anchored_query
-
-            except Exception as e:
-                print(f"  [RAG-Entertainment] Query distillation failed: {e}")
-                ddg_query = query
-
-            print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
+    # ── Stage 1: decide whether and what to search ───────────────────────────
+    if generate_answer_fn is not None:
+        decision, search_query = _get_search_decision(query, generate_answer_fn)
     else:
-        ddg_query = query
-        print(f"  [RAG-Entertainment] No subject ID needed. Query: {ddg_query!r}")
-    # ------------------------------------------------------------------ #
-    # Helpers                                                              #
-    # ------------------------------------------------------------------ #
+        # no LLM available — search with raw query
+        decision, search_query = "SEARCH", query
+
+    if decision == "SKIP":
+        print("  [RAG-Entertainment] Skipping search (article reference or unnamed subject).")
+        return ""
+
+    if decision == "PARAMETRIC":
+        print("  [RAG-Entertainment] Parametric question — no search needed.")
+        return ""
+
+    # decision == "SEARCH"
+    print(f"  [RAG-Entertainment] Query: {search_query!r}")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
     snippets: list[str] = []
     seen: set[str] = set()
 
@@ -248,34 +277,35 @@ def rag_entertainment(query: str, num_results: int = 3,
             seen.add(text)
             snippets.append(text)
 
-
+    # ── Stage 2: Wikipedia first ─────────────────────────────────────────────
     print(f"  [RAG-Entertainment] Trying Wikipedia...")
-    wiki_result = _wiki(ddg_query)
+    wiki_result = _wiki(search_query)
+
     if _wiki_is_useful(wiki_result) and _is_relevant(wiki_result, query):
-    # Wikipedia is both substantial AND relevant to this question
         print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars), skipping DDG.")
         _add(wiki_result)
 
     else:
         if wiki_result and not _is_relevant(wiki_result, query):
-        # Wikipedia found something but it's off-topic — still try DDG
-             print(f"  [RAG-Entertainment] Wikipedia result not relevant, trying DDG too.")
-             _add(wiki_result)  # keep it as weak signal
+            print(f"  [RAG-Entertainment] Wikipedia result not relevant, trying DDG too.")
+            _add(wiki_result)
         else:
-             print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
+            print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
 
+        # ── Stage 3: DDG fallback ─────────────────────────────────────────────
         try:
             from ddgs import DDGS
             with DDGS() as ddgs:
-                for r in ddgs.text(ddg_query, max_results=num_results, timeout=8):
+                for r in ddgs.text(search_query, max_results=num_results, timeout=8):
+                    body  = r.get("body",  "")
                     title = r.get("title", "")
-                    body = r.get("body", "")
-                    url = r.get("href", "")
+                    url   = r.get("href",  "")
                     if _is_quality_snippet(body, url):
-                        _add(f"[{title}]{body}" if title else body)
+                        _add(f"[{title}] {body}" if title else body)
         except Exception as exc:
             print(f"  [RAG-Entertainment] DDG failed: {exc}")
 
+    # ── Stage 4: relevance filter — always runs regardless of source ──────────
     if snippets:
         relevant = [s for s in snippets if _is_relevant(s, query)]
         snippets = relevant if relevant else snippets
