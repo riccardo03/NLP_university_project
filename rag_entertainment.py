@@ -35,72 +35,77 @@ _STOP_WORDS = {
 
 _QUERY_DECISION_SYSTEM = (
     "You are a search assistant for an entertainment trivia bot. "
-    "Given a multiple-choice quiz question, decide whether web search is needed "
-    "and if so, what to search for. "
-    "\n\n"
-    "Output EXACTLY one of these three formats and nothing else:\n"
+    "Given a quiz question, follow these steps in order and output "
+    "your final decision on the last line.\n"
     "\n"
-    "SKIP\n"
-    "  — Use when the question references source material that cannot be found "
-    "online: 'according to the article', 'as described in the text', "
-    "'as mentioned in the article', 'as stated', 'based on the passage', "
-    "'in his/her own words', OR when the question says 'the film/show/book' "
-    "without naming it (e.g. 'the film portrays...' with no film title given).\n"
+    "STEP 1 — Check for unanswerable references.\n"
+    "Does the question contain any of these phrases ANYWHERE, even at the end?\n"
+    "  - 'according to the article/text/passage'\n"
+    "  - 'as described/mentioned/stated in the article'\n"
+    "  - 'based on the passage'\n"
+    "  - 'in his/her own words'\n"
+    "  - 'the film/show/book' with NO title given (e.g. 'the film portrays' "
+    "but not 'the film Titanic portrays')\n"
+    "If YES → output: SKIP\n"
     "\n"
-    "PARAMETRIC\n"
-    "  — Use when the question is about a general concept or definition with "
-    "no specific named entity (e.g. 'what is sonata form', 'define jazz fusion', "
-    "'which term describes a melody'). The LLM can answer from its own knowledge.\n"
+    "STEP 2 — Check for named entities.\n"
+    "Is there a specific named person, film, song, album, show, or event?\n"
+    "If NO (pure concept question like 'what is sonata form') → output: PARAMETRIC\n"
     "\n"
-    "SEARCH: <query>\n"
-    "  — Use for all other questions. <query> must be 3-6 words, targeting the "
-    "topic not the answer.\n"
+    "STEP 3 — Build the search query.\n"
+    "Follow these rules:\n"
+    "  a) Start with the named entity (person, film, song, show).\n"
+    "  b) If the question asks about a RELATIONSHIP between two named entities, "
+    "include both.\n"
+    "  c) If the question implies a well-known work without naming it "
+    "(e.g. 'Tom Hanks integrated into archival footage' implies Forrest Gump, "
+    "'the shark film' implies Jaws), infer the title and include it.\n"
+    "  d) Add 1-2 context words that narrow which PAGE is needed: "
+    "biography, career, filmography, formation, production, early life, "
+    "relationship, discography.\n"
+    "  e) Drop everything else: question words, verbs, consequence words "
+    "(impact, legacy, reason, mental health, effect, result), filler.\n"
+    "  f) 3-6 words total. Spaces between every word. No non-English characters.\n"
+    "Output: SEARCH: <query>\n"
     "\n"
-    "Rules for SEARCH queries:\n"
-    "- Use proper names and 1-2 context words (biography, career, filmography, "
-    "history, relationship, album, film).\n"
-    "- For relationship questions between TWO named entities, include both names.\n"
-    "- Include specific years or titles when they narrow which page is needed.\n"
-    "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
-    "- Drop: consequence words (impact, legacy, mental health, effect, result, "
-    "controversy, reason, primary).\n"
-    "- Always put a space between every word. Never merge words.\n"
-    "- Never include non-English characters.\n"
+    "Examples of the reasoning:\n"
+    "Q: What was the primary reason James Cameron switched from physics to English?\n"
+    "Step1: no article reference → continue\n"
+    "Step2: 'James Cameron' is a named person → continue\n"
+    "Step3: entity=James Cameron, context=biography early career → "
+    "SEARCH: James Cameron biography early career\n"
     "\n"
-    "Examples:\n"
-    "Q: What was the primary reason James Cameron switched from physics to English? "
-    "→ SEARCH: James Cameron biography early career\n"
-    "Q: According to the article, what does the author argue? → SKIP\n"
-    "Q: Which term describes the way the film portrays antebellum life? → SKIP\n"
-    "Q: Which of the following best describes the fundamental principle of sonata "
-    "form? → PARAMETRIC\n"
-    "Q: How does 'Hey Joe' relate to 'Purple Haze'? "
-    "→ SEARCH: Hey Joe Purple Haze Jimi Hendrix\n"
-    "Q: What was Kanye West's 2002 car accident? "
-    "→ SEARCH: Kanye West 2002 car accident\n"
-    "Q: Which term best describes Jack Nicholson's relationship with his mother "
-    "as mentioned in the article? → SKIP\n"
-    "Q: What is jazz fusion? → PARAMETRIC\n"
-    "Q: Which of the following best describes the significance of the Tramp "
-    "character in Chaplin's films? "
-    "→ SEARCH: Charlie Chaplin Tramp character significance\n"
-    "Q: What was the primary reason Spielberg decided to direct Schindler's List? "
-    "→ SEARCH: Spielberg Schindler List motivation Jewish heritage\n"
-    "Q: How did Taylor's relationship with Richard Burton impact her public image? "
-    "→ SEARCH: Elizabeth Taylor Richard Burton relationship\n"
-    "Q: What is Mr. Bean's profession in the first film adaptation? "
-    "→ SEARCH: Bean 1997 film Mr Bean\n"
-    "Q: Which of Hitchcock's films is known for the dolly zoom effect? "
-    "→ SEARCH: Hitchcock dolly zoom Vertigo\n"
-    "Q: What is the primary instrument played by The Edge in U2? "
-    "→ SEARCH: The Edge U2 guitarist\n"
-    "Q: Which of the following best describes the fundamental principle of "
-    "classical Hollywood continuity editing? → PARAMETRIC\n"
-    "Q: What was the primary reason for the Beatles' decision to retire from "
-    "live performances in 1966? "
-    "→ SEARCH: Beatles 1966 retire live performances\n"
+    "Q: According to the article, what does the author argue?\n"
+    "Step1: 'according to the article' found → SKIP\n"
+    "\n"
+    "Q: Which term describes the way the film portrays antebellum life?\n"
+    "Step1: 'the film' with no title → SKIP\n"
+    "\n"
+    "Q: What is the fundamental principle of sonata form?\n"
+    "Step1: no article reference → continue\n"
+    "Step2: no named entity → PARAMETRIC\n"
+    "\n"
+    "Q: Which visual effects technique was used to integrate Tom Hanks "
+    "into archival footage?\n"
+    "Step1: no article reference → continue\n"
+    "Step2: 'Tom Hanks' named, 'archival footage' implies Forrest Gump → continue\n"
+    "Step3: entity=Forrest Gump Tom Hanks, context=visual effects production → "
+    "SEARCH: Forrest Gump visual effects production\n"
+    "\n"
+    "Q: Which of the following was a key challenge faced by Coldplay "
+    "during their early years?\n"
+    "Step1: no article reference → continue\n"
+    "Step2: 'Coldplay' is a named band → continue\n"
+    "Step3: entity=Coldplay, context=biography formation → "
+    "SEARCH: Coldplay band biography formation\n"
+    "\n"
+    "Q: How did Freddie Mercury's relationship with Mary Austin evolve "
+    "over time according to the article?\n"
+    "Step1: 'according to the article' found at end of question → SKIP\n"
+    "\n"
+    "Output format: write the steps briefly, then the final decision on the last line.\n"
+    "The last line must be exactly SKIP, PARAMETRIC, or SEARCH: <query>.\n"
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -126,26 +131,28 @@ def _get_search_decision(query: str, generate_answer_fn) -> tuple[str, str]:
         raw = generate_answer_fn(
             _QUERY_DECISION_SYSTEM,
             f"Q: {query}",
-            max_new_tokens=20
+            max_new_tokens=100
         ).strip()
 
-        upper = raw.upper()
+        lines = [l.strip() for l in raw.split('\n') if l.strip()]
+        decision_line = lines[-1] if lines else ""
+        upper = decision_line.upper()
+
 
         if upper.startswith("SKIP"):
             return "SKIP", ""
         elif upper.startswith("PARAMETRIC"):
             return "PARAMETRIC", ""
         elif upper.startswith("SEARCH:"):
-            search_query = _sanitize_query(raw[7:].strip())
-            if search_query and len(search_query) > 2:
-                return "SEARCH", search_query
-            else:
-                # malformed SEARCH output — fall back to raw question
-                return "SEARCH", query
+            search_query = _sanitize_query(decision_line[7:].strip())
+            return "SEARCH", search_query if len(search_query) > 2 else query
         else:
-            # unexpected format — treat entire output as query
-            search_query = _sanitize_query(raw)
-            return "SEARCH", search_query if search_query else query
+            # fallback — scan all lines for a SEARCH decision
+            for line in reversed(lines):
+                if line.upper().startswith("SEARCH:"):
+                    search_query = _sanitize_query(line[7:].strip())
+                    return "SEARCH", search_query if len(search_query) > 2 else query
+            return "SEARCH", query
 
     except Exception as e:
         print(f"  [RAG-Entertainment] Decision LLM failed: {e}")
