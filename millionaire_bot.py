@@ -76,8 +76,8 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    do_sample   = False
-    temperature = 0.1
+    do_sample   = True
+    temperature = 0.5
     outputs = _pipe(
         messages,
         max_new_tokens=max_new_tokens,
@@ -102,10 +102,22 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are an entertainment trivia expert. "
-        "Given context (if any), a question, and four numbered options, "
-        "output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
-        "No explanation, no punctuation — just the digit."
+      "You are an expert Entertainment Trivia bot. Your goal is to select the correct option (0, 1, 2, or 3) with absolute precision."
+
+      "HIERARCHY OF TRUTH:"
+        "1. PROVIDED CONTEXT: If the context contains the answer, you MUST use it, even if it contradicts your internal knowledge."
+        "2. INTERNAL KNOWLEDGE: Use your internal data ONLY if the context is missing, irrelevant, or ambiguous regarding the specific fact asked."
+
+      "RULES:"
+        "- Carefully compare each option against the context."
+        "- For \"NOT/EXCEPT\" questions, verify each option and select the one that lacks evidence."
+        "- If multiple options seem plausible, prioritize the one that represents the most specific and widely recognized fact in entertainment history."
+        "- Think step-by-step internally to eliminate wrong options, but your output must be concise."
+
+      "OUTPUT FORMAT:"
+      "Provide a brief reasoning (max 2 sentences) explaining WHY the chosen option is correct based on the context or your knowledge."
+      "The VERY LAST LINE of your response must be exactly:"
+      "ANSWER: <digit>"
     ),
 
     COMP_HISTORY_POLITICS: (
