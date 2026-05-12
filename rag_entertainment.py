@@ -7,7 +7,7 @@ import re
 import concurrent.futures
 
 _ARTICLE_REF_RE = re.compile(
-    r'\b(according to|as described in|as stated in|based on|per) '
+    r'\b(according to|as described in|as stated in|in his own words|based on|per) '
     r'(the article|the text|the passage|the excerpt)\b', re.I
 )
 _LOW_QUALITY_SIGNALS = [
@@ -48,6 +48,7 @@ _QUERY_GEN_SYSTEM = (
     "discography, career, history, relationship).\n"
     "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
     "- Output ONLY the query string. No punctuation at the end. No explanation.\n"
+    "Always put a space between every word. Never merge words together.\n"
     "\n"
     "Examples:\n"
     "Question: Katharine Hepburn career spanning six decades variety of roles → "
@@ -173,13 +174,19 @@ def _extract_keywords(text: str) -> list[str]:
 def _is_relevant(snippet: str, question: str) -> bool:
     keywords = _extract_keywords(question)
     if not keywords:
-        return True  # no keywords to check, keep everything
+        return True
     snippet_lower = snippet.lower()
+    
+    # Check quoted titles first — if question names a specific work,
+    # that work must appear in the context
+    quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", question)
+    for match in quoted:
+        title = (match[0] or match[1]).lower()
+        if len(title) > 3 and title not in snippet_lower:
+            return False
+    
     matches = sum(1 for kw in keywords if kw in snippet_lower)
-    # require at least 2 question keywords to appear
     return matches >= 2
-
-
 
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
