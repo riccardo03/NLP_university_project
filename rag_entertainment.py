@@ -210,25 +210,24 @@ def rag_entertainment(query: str, num_results: int = 3,
                 if subject.upper() == "NONE" or len(subject) < 3:
                      print("  [RAG-Entertainment] No subject identified, using raw query.")
                      ddg_query = query
+
                 elif " AND " in subject.upper():
     # relationship question — use both entities as the search anchor
                      parts = re.split(r'\s+AND\s+', subject, flags=re.I)
                      combined = " ".join(p.strip() for p in parts)
                      print(f"  [RAG-Entertainment] Multi-entity subject: {parts}")
-                     anchored_query = f"{combined} {query}"[:120]
+                     ddg_query = f"{combined} {query}"[:120]
                 else:
                      subject = subject.strip('"').strip("'")
                      print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
-
                      anchored_query = f"{subject} {query}"[:120]
                      user_msg = f"Question: {anchored_query}"
                      raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=15)
                      distilled = raw.strip().strip('"').strip("'")
-
-                if distilled and len(distilled) > 3:
-                    ddg_query = distilled
-                else: 
-                    ddg_query = anchored_query
+                     if distilled and len(distilled) > 3:
+                         ddg_query = distilled
+                     else: 
+                         ddg_query = anchored_query
 
             except Exception as e:
                 print(f"  [RAG-Entertainment] Query distillation failed: {e}")
@@ -273,12 +272,12 @@ def rag_entertainment(query: str, num_results: int = 3,
                     body = r.get("body", "")
                     url = r.get("href", "")
                     if _is_quality_snippet(body, url):
-                        _add(f"[{title}]{body}" if title else {body})
+                        _add(f"[{title}]{body}" if title else body)
         except Exception as exc:
             print(f"  [RAG-Entertainment] DDG failed: {exc}")
 
-        if snippets:
-            relevant = [s for s in snippets if _is_relevant(s, query)]
-            snippets = relevant if relevant else snippets
+    if snippets:
+        relevant = [s for s in snippets if _is_relevant(s, query)]
+        snippets = relevant if relevant else snippets
 
     return "\n\n".join(snippets)[:3500] if snippets else ""
