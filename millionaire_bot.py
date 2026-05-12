@@ -206,7 +206,7 @@ def extract_answer_id(text: str, num_options: int = 4) -> int:
     # Priority 0: explicit structured tag "ANSWER: X"
     tag_match = re.search(r"\bANSWER\s*:\s*([0-3])\b", text, re.I)
     if tag_match:
-        idx = int(tag_match.group(1))
+        idx = int(tag_match.group(-1))
         if idx < num_options:
             return idx
 
@@ -243,7 +243,9 @@ def build_user_prompt(question_text: str, options: list, context: str) -> str:
         f"{ctx_block}"
         f"Question: {question_text}\n\n"
         f"Options:\n{options_str}\n\n"
-        "Reply with ONLY the option number (0, 1, 2, or 3)."
+        f"Reason BRIEFLY (1 sentence max), then output ONLY:\n"
+        f"ANSWER: X\n"
+        f"(where X is 0, 1, 2, or 3)"
     )
 
 
