@@ -70,9 +70,18 @@ _SUBJECT_TRIGGERS = re.compile(
     re.I
 )
 
+_PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
+_POSSESSIVE_PROPER_RE = re.compile(r"\b([A-Z][a-z]{2,})'s\b")
+
 def _needs_subject_id(question: str) -> bool:
-    """Only run subject ID if the question is about a named entertainment entity."""
-    return bool(_SUBJECT_TRIGGERS.search(question))
+    if _SUBJECT_TRIGGERS.search(question):
+        return True
+    if _PROPER_NOUN_RE.findall(question):
+        return True
+    if _POSSESSIVE_PROPER_RE.findall(question):
+        return True
+    return False
+
 
 def _wiki(query: str, sentences: int = 5) -> str:
     """Fetch a Wikipedia summary; returns '' on any failure."""
