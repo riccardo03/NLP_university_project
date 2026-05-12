@@ -42,7 +42,8 @@ _STOP_WORDS = {
     "been", "were", "would", "could", "should", "according"
 }
 
-_PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
+# [A-Z][a-zA-Z]+ handles mixed-case surnames like McCartney, McDonald
+_PROPER_NOUN_RE = re.compile(r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)')
 
 def _is_quality_snippet(text: str, url: str = "") -> bool:
     if not text or len(text.strip()) < 80:
@@ -58,26 +59,50 @@ def _is_quality_snippet(text: str, url: str = "") -> bool:
     return True
 
 
+def _build_wiki_query(query: str) -> str:
+    """
+    Strip the search query down to its primary entity for Wikipedia lookup.
+    Wikipedia needs a page title, not a full search phrase.
+    Falls back to the full query if no proper noun is found.
+    """
+    proper = _PROPER_NOUN_RE.search(query)
+    if proper:
+        return proper.group(1).strip()
+    return query
+
+
 def _wiki(query: str) -> str:
-    """Fetch a Wikipedia summary; returns '' on any failure."""
+    """
+    Two-step Wikipedia fetch: search() for a title, then page() for content.
+    Returns '' on any failure.
+    """
     try:
         import wikipedia
         wikipedia.set_lang("en")
+
+        titles = wikipedia.search(query, results=3)
+        if not titles:
+            return ""
+        title = titles[0]
+
         try:
-            page = wikipedia.page(query, auto_suggest=False)
-            summary = wikipedia.summary(query, sentences=3, auto_suggest=False)
-            paragraphs = [
-                p.strip() for p in page.content.split("\n")
-                if len(p.strip()) > 100
-            ]
-            # Take only the first 2 substantial paragraphs beyond the summary
-            extra = "\n\n".join(paragraphs[:2])
-            combined = f"{summary}\n\n{extra}"
-            return combined[:2000]
+            page = wikipedia.page(title, auto_suggest=False)
         except wikipedia.exceptions.DisambiguationError as e:
-            return wikipedia.summary(e.options[0], sentences=3, auto_suggest=False)
+            if not e.options:
+                return ""
+            page = wikipedia.page(e.options[0], auto_suggest=False)
         except wikipedia.exceptions.PageError:
             return ""
+
+        summary = wikipedia.summary(title, sentences=4, auto_suggest=False)
+        paragraphs = [
+            p.strip() for p in page.content.split("\n")
+            if len(p.strip()) > 120
+        ]
+        extra = "\n\n".join(paragraphs[:2])
+        combined = f"{summary}\n\n{extra}" if extra else summary
+        return combined[:1200]
+
     except Exception:
         return ""
 
@@ -189,8 +214,9 @@ def rag_entertainment(query: str, num_results: int = 3,
     # ------------------------------------------------------------------ #
     # Stage 1: regex-based query (no LLM call)                           #
     # ------------------------------------------------------------------ #
-    ddg_query = _build_query(query)
-    print(f"  [RAG-Entertainment] Final search query: {ddg_query!r}")
+    ddg_query  = _build_query(query)
+    wiki_query = _build_wiki_query(ddg_query)
+    print(f"  [RAG-Entertainment] DDG query: {ddg_query!r}  Wiki query: {wiki_query!r}")
 
     # ------------------------------------------------------------------ #
     # Stage 2: Wikipedia + DDG in parallel, 4 s timeout each             #
@@ -204,7 +230,7 @@ def rag_entertainment(query: str, num_results: int = 3,
             snippets.append(text)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        wiki_fut = pool.submit(_wiki, ddg_query)
+        wiki_fut = pool.submit(_wiki, wiki_query)
         ddg_fut  = pool.submit(_fetch_ddg, ddg_query, num_results)
 
         try:
