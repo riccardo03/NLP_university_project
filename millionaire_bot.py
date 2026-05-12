@@ -12,7 +12,7 @@ from transformers import logging as transformers_logging
 
 from rag_entertainment import rag_entertainment
 from rag_history      import rag_history
-from rag_science      import rag_science, warmup_reranker
+from rag_science      import rag_science
 from rag_maths        import rag_maths
 
 warnings.filterwarnings("ignore")
@@ -88,13 +88,8 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 
 def warmup_models() -> None:
-    """
-    Force-load all lazily-initialized models before the game timer starts.
-    Warm the cross-encoder now,  we avoid cold timeouts later.
-    """
-    print("  [Warmup] Loading cross-encoder...")
-    warmup_reranker()
-    print("  [Warmup] All models ready.")
+    """No-op: cross-encoder removed, no models require pre-loading."""
+    print("  [Warmup] All models ready (no pre-loading required).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
