@@ -1,12 +1,6 @@
 """
 RAG pipeline for the Entertainment competition.
 Wikipedia first, DuckDuckGo to supplement.
-
-Improvements over v1:
-- LLM distillation prompt explicitly instructs to use options as guide
-- Wikipedia lookup runs for each option that looks like a named entity
-- DDG runs a "base_query + option" search for every option
-- Post-retrieval filtering keeps only snippets relevant to at least one option
 """
 
 import re
@@ -17,19 +11,68 @@ _ARTICLE_REF_RE = re.compile(
 )
 
 _QUERY_GEN_SYSTEM = (
-    "You are a search-query optimizer. "
-    "Given a quiz question and its possible answers, output a concise DuckDuckGo "
-    "search query of at most 10 words that would help determine the correct answer. "
-    "Focus on proper nouns, names, titles, and years. "
-    "Return ONLY the query string — no explanation, no punctuation at the end."
+    "You are a search-query generator for an entertainment trivia bot. "
+    "Given a question (already anchored to its subject), output a SHORT search query "
+    "of 3 to 6 words that will retrieve a Wikipedia or web page "
+    "WHERE THE ANSWER CAN BE READ. "
+    "\n\n"
+    "Rules:\n"
+    "- Target the TOPIC, not the answer. Generate a query to find the right PAGE, "
+    "not to pre-encode the answer.\n"
+    "- 3 to 6 words maximum. Shorter is better.\n"
+    "- Keep: proper nouns, titles, years, and 1-2 context words (biography, filmography, "
+    "discography, career, history, relationship).\n"
+    "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
+    "- Output ONLY the query string. No punctuation at the end. No explanation.\n"
+    "\n"
+    "Examples:\n"
+    "Question: James Cameron James Cameron primary reason switched physics English → "
+    "James Cameron biography early career\n"
+    "Question: The Godfather The Godfather director who directed → "
+    "The Godfather 1972 film\n"
+    "Question: Michael Jackson Thriller In what year did Michael Jackson release Thriller → "
+    "Michael Jackson Thriller album release\n"
+    "Question: 12-bar blues How does the blues form relate to 12-bar blues structure → "
+    "12-bar blues music theory\n"
+    "Question: Academy Awards Which film won Best Picture at the 2020 Academy Awards → "
+    "Academy Awards 2020 Best Picture\n"
 )
 
 _SUBJECT_IDENTIFICATION_SYSTEM = (
-    "You are an entertainment expert. "
-    "Given a quiz question about a film, song, artist, or show, "
-    "identify the specific title or subject being referred to, even if not explicitly named. "
-    "Output ONLY the identified subject — no explanation."
+    "You are a search assistant for an entertainment quiz bot. "
+    "Given a quiz question, extract the PRIMARY named entity — "
+    "the specific person, film, song, album, TV show, award, character, or event "
+    "that the question is ABOUT. "
+    "\n\n"
+    "Rules:\n"
+    "- Output ONLY the entity name, as short as possible (1-4 words).\n"
+    "- If the question is about a concept, relationship, or process with NO named entity, "
+    "output exactly: NONE\n"
+    "- Never output a full sentence. Never explain.\n"
+    "- If multiple entities appear, pick the one the question is primarily asking about.\n"
+    "\n"
+    "Examples:\n"
+    "Q: What was the primary reason James Cameron switched from physics to English? → James Cameron\n"
+    "Q: Who directed The Godfather? → The Godfather\n"
+    "Q: How does the blues form relate to the 12-bar structure? → NONE\n"
+    "Q: Which actor played Tony Stark in the Marvel films? → Tony Stark Marvel\n"
+    "Q: In what year did Michael Jackson release Thriller? → Michael Jackson Thriller\n"
 )
+
+_STOP_WORDS = {
+    "what", "when", "which", "where", "does", "have", "this",
+    "that", "from", "with", "about", "into", "their", "there",
+    "been", "were", "would", "could", "should", "according"
+}
+
+_SUBJECT_TRIGGERS = re.compile(
+    r'\b(film|movie|song|album|series|show|band|actor|actress|director|artist|character)\b',
+    re.I
+)
+
+def _needs_subject_id(question: str) -> bool:
+    """Only run subject ID if the question is about a named entertainment entity."""
+    return bool(_SUBJECT_TRIGGERS.search(question))
 
 def _wiki(query: str, sentences: int = 5) -> str:
     """Fetch a Wikipedia summary; returns '' on any failure."""
@@ -37,12 +80,7 @@ def _wiki(query: str, sentences: int = 5) -> str:
         import wikipedia
         wikipedia.set_lang("en")
         try:
-            page = wikipedia.page(query, auto_suggest=True)
-            # Cerca il paragrafo più rilevante invece delle prime frasi
-            content = page.content
-            paragraphs = [p for p in content.split("\n") if len(p) > 100]
-            # Restituisci i primi 3 paragrafi rilevanti
-            return "\n\n".join(paragraphs[:3])
+            return wikipedia.summary(query, sentences=sentences, auto_suggest=True)
         except wikipedia.exceptions.DisambiguationError as e:
             return wikipedia.summary(e.options[0], sentences=sentences)
         except wikipedia.exceptions.PageError:
@@ -51,28 +89,23 @@ def _wiki(query: str, sentences: int = 5) -> str:
         return ""
 
 
-def _is_relevant(text: str, options: list[str]) -> bool:
-    """Return True if the snippet mentions at least one of the answer options."""
-    text_lower = text.lower()
-    return any(opt.lower() in text_lower for opt in options)
+def _extract_keywords(text: str) -> list[str]:
+    words = re.findall(r'\b[a-z]{4,}\b', text.lower())
+    return [w for w in words if w not in _STOP_WORDS]
 
-
+def _is_relevant(snippet: str, question: str) -> bool:
+    keywords = _extract_keywords(question)
+    if not keywords:
+        return True  # no keywords to check, keep everything
+    snippet_lower = snippet.lower()
+    matches = sum(1 for kw in keywords if kw in snippet_lower)
+    # require at least 2 question keywords to appear
+    return matches >= 2
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
     """
     Wikipedia + DuckDuckGo RAG for entertainment quiz questions.
-
-
-    Pipeline:
-        1. Skip document-reference questions (no web source can substitute).
-        2. [Optional] Distil the query with an LLM, using options as guidance.
-        3a. Wikipedia — main query lookup.
-        3b. DuckDuckGo — main query search.
-        4. Filter snippets to those that mention at least one option.
-        5. Return up to 2000 characters of deduplicated context.
     """
-    # Guard: document-reference questions can't be answered by web search  #
-    # ------------------------------------------------------------------ #
     if _ARTICLE_REF_RE.search(query):
         print("  [RAG-Entertainment] Article-reference question — skipping search.")
         return ""
@@ -80,30 +113,39 @@ def rag_entertainment(query: str, num_results: int = 3,
     # Stage 1: LLM query distillation                                      #
     # ------------------------------------------------------------------ #
     ddg_query = query
-    if generate_answer_fn is not None:
+    if generate_answer_fn is not None and _needs_subject_id(query):
             try:
                 subject = generate_answer_fn(
                     _SUBJECT_IDENTIFICATION_SYSTEM,
-                    query,
-                    max_new_tokens=20
+                    f"Q: {query}",
+                    max_new_tokens=15
                 ).strip()
-                print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
-                anchored_query = f"{subject} {query}" if subject else query
+                
+                if subject.upper() == "NONE" or len(subject) < 3:
+                     print("  [RAG-Entertainment] No subject identified, using raw query.")
+                     ddg_query = query
+                else:
+                     subject = subject.strip('"').strip("'")
+                     print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
 
-                user_msg = (
-                    f"Question: {anchored_query}\n"
-                    f"Possible answers: {', '.join(option_texts)}\n"
-                    "Generate a search query to find which answer is correct."
-                ) if option_texts else anchored_query
-
-                raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, 20)
+                anchored_query = f"{subject} {query}"[:120]
+                user_msg = f"Question: {anchored_query}"
+                raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=15)
                 distilled = raw.strip().strip('"').strip("'")
-                if distilled:
+
+                if distilled and len(distilled) > 3:
                     ddg_query = distilled
+                else: 
+                    ddg_query = anchored_query
+
             except Exception as e:
                 print(f"  [RAG-Entertainment] Query distillation failed: {e}")
-            print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
+                ddg_query = query
 
+            print(f"  [RAG-Entertainment] Query: {ddg_query!r}")
+    else:
+        ddg_query = query
+        print(f"  [RAG-Entertainment] No subject ID needed. Query: {ddg_query!r}")
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
