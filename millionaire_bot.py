@@ -30,6 +30,13 @@ COMP_NAMES = {
     COMP_MATHS:            "Maths",
 }
 
+_MAX_TOKENS = {
+    COMP_ENTERTAINMENT:    20,
+    COMP_HISTORY_POLITICS: 10,
+    COMP_SCIENCE_NATURE:   40,
+    COMP_MATHS:            40,
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 2 · Model loading
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,29 +105,17 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-      "You are an expert Entertainment Trivia bot. Your goal is to select the correct option (0, 1, 2, or 3) with absolute precision."
-
-      "HIERARCHY OF TRUTH:"
-        "1. PROVIDED CONTEXT: If the context contains the answer, you MUST use it, even if it contradicts your internal knowledge."
-        "2. INTERNAL KNOWLEDGE: Use your internal data ONLY if the context is missing, irrelevant, or ambiguous regarding the specific fact asked."
-
-      "RULES:"
-        "- Carefully compare each option against the context."
-        "- For \"NOT/EXCEPT\" questions, verify each option and select the one that lacks evidence."
-        "- If multiple options seem plausible, prioritize the one that represents the most specific and widely recognized fact in entertainment history."
-        "- Think step-by-step internally to eliminate wrong options, but your output must be concise."
-
-      "OUTPUT FORMAT:"
-      "Provide a brief reasoning (max 2 sentences) explaining WHY the chosen option is correct based on the context or your knowledge."
-      "The VERY LAST LINE of your response must be exactly:"
-      "ANSWER: <digit>"
+        "You are an entertainment trivia expert. "
+        "Given context (if any), a question, and four numbered options, "
+        "output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
+        "No explanation, no punctuation — just the digit."
     ),
 
     COMP_HISTORY_POLITICS: (
-        "You are a historian and political scientist with expertise spanning ancient civilizations, medieval history, modern geopolitics, wars, revolutions, constitutions, and world leaders. "
-        "When context is provided, prioritize it over your own knowledge. "
-        "Output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
-        "No punctuation, no explanation, no reasoning — just the digit."
+        "You are a history and politics expert. "
+        "Given context (if any), a question, and four numbered options, "
+        "output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
+        "No explanation, no punctuation — just the digit."
     ),
 
     COMP_SCIENCE_NATURE: (
@@ -296,9 +291,9 @@ def play_game(game, comp_id: int) -> dict:
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking...")
         t1 = time.time()
-        tokens = 400 
+        max_tokens = _MAX_TOKENS[comp_id]
 
-        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=tokens)
+        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=max_tokens)
         answer_id = extract_answer_id(raw_output, num_options=len(question.options))
 
         # Self-consistency disabled — model is too slow (~2 tok/s) for 3 LLM calls in 30s

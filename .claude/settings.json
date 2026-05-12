@@ -5,7 +5,9 @@
       "Bash(git checkout *)",
       "Bash(git add *)",
       "Bash(git rebase *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(python -c ' *)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

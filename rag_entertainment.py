@@ -23,6 +23,8 @@ _LOW_QUALITY_SIGNALS = [
     r'wikia\.com',
 ]
 
+ 
+
 _TRUSTED_DOMAINS = {
     "wikipedia.org",
     "britannica.com",
@@ -34,70 +36,13 @@ _TRUSTED_DOMAINS = {
     "billboard.com",
 }
 
-# Single fused prompt: subject identification + query generation in one LLM call.
-_SEARCH_STRATEGY_SYSTEM = (
-    "You are a search strategist for an entertainment trivia bot. "
-    "Given a quiz question, output TWO fields on a single line:\n"
-    "  SUBJECT: <the primary named entity the question is about (1-4 words)>\n"
-    "  QUERY: <a 3-6 word search query that retrieves the answer page>\n"
-    "\n"
-    "Rules for SUBJECT:\n"
-    "- One specific person, film, song, album, TV show, award, character, or event.\n"
-    "- If two entities are compared/related, write both: 'Entity A AND Entity B'.\n"
-    "- If there is no named entity, write NONE.\n"
-    "\n"
-    "Rules for QUERY:\n"
-    "- Target the topic page, NOT the answer itself.\n"
-    "- Keep: proper nouns, titles, years, 1-2 context words (biography, filmography, "
-    "discography, career, history, relationship).\n"
-    "- Drop: question words (what, why, how, when, which), verbs, filler words.\n"
-    "- 3 to 6 words maximum. No punctuation at end.\n"
-    "\n"
-    "Output format (EXACTLY — no other text):\n"
-    "SUBJECT: <value> | QUERY: <value>\n"
-    "\n"
-    "Examples:\n"
-    "Q: What was the primary reason James Cameron switched from physics to English? → "
-    "SUBJECT: James Cameron | QUERY: James Cameron biography early career\n"
-    "Q: Who directed The Godfather? → "
-    "SUBJECT: The Godfather | QUERY: The Godfather 1972 film\n"
-    "Q: In what year did Michael Jackson release Thriller? → "
-    "SUBJECT: Michael Jackson Thriller | QUERY: Michael Jackson Thriller album release\n"
-    "Q: Which actor played Tony Stark in the Marvel films? → "
-    "SUBJECT: Tony Stark Marvel | QUERY: Tony Stark Iron Man Marvel cast\n"
-    "Q: How does the blues form relate to the 12-bar structure? → "
-    "SUBJECT: NONE | QUERY: 12-bar blues music theory\n"
-    "Q: Which film won Best Picture at the 2020 Academy Awards? → "
-    "SUBJECT: Academy Awards 2020 | QUERY: Academy Awards 2020 Best Picture winner\n"
-)
-
 _STOP_WORDS = {
     "what", "when", "which", "where", "does", "have", "this",
     "that", "from", "with", "about", "into", "their", "there",
     "been", "were", "would", "could", "should", "according"
 }
 
-_SUBJECT_TRIGGERS = re.compile(
-    r'\b(film|movie|song|album|series|show|band|actor|actress|director|artist|character)\b',
-    re.I
-)
-
 _PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
-_POSSESSIVE_PROPER_RE = re.compile(r"\b([A-Z][a-z]{2,})'s\b")
-_SINGLE_NAME_RE = re.compile(
-    r'\b(?:between|behind|describes|about|by|for|of|with|from|in|on)\s+([A-Z][a-z]{2,})\b'
-)
-
-def _needs_subject_id(question: str) -> bool:
-    if _SUBJECT_TRIGGERS.search(question):
-        return True
-    if _PROPER_NOUN_RE.findall(question):
-        return True
-    if _POSSESSIVE_PROPER_RE.findall(question):
-        return True
-    if _SINGLE_NAME_RE.findall(question):
-        return True
-    return False
 
 def _is_quality_snippet(text: str, url: str = "") -> bool:
     if not text or len(text.strip()) < 80:
@@ -172,79 +117,83 @@ def _is_relevant(snippet: str, question: str) -> bool:
     matches = sum(1 for kw in keywords if kw in snippet_lower)
     return matches >= 2
 
-def _parse_search_strategy(raw: str) -> tuple[str, str]:
-    """
-    Parse 'SUBJECT: <val> | QUERY: <val>' from LLM output.
-    Returns (subject, query). Falls back gracefully on malformed output.
-    """
-    raw = raw.strip()
-    subject = ""
-    query = ""
 
-    subject_m = re.search(r'SUBJECT\s*:\s*(.+?)(?:\s*\|\s*QUERY|\Z)', raw, re.I)
-    query_m = re.search(r'QUERY\s*:\s*(.+)', raw, re.I)
+_QUOTED_TITLE_RE = re.compile(r"""['"]([^'"]{2,60}?)['"]""")
+_YEAR_RE = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
 
-    if subject_m:
-        subject = subject_m.group(1).strip().strip('"').strip("'")
-    if query_m:
-        query = query_m.group(1).strip().strip('"').strip("'")
 
-    return subject, query
-
-def _get_search_decision(question: str, generate_answer_fn) -> str:
+def _build_query(question: str) -> str:
     """
-    Single LLM call that returns both subject and distilled query.
-    Returns the best ddg_query string to use.
+    Pure-regex query builder — no LLM call.
+
+    Priority 1: quoted titles  e.g. 'Thriller', "E.T."
+    Priority 2: multi-word proper nouns  e.g. "James Cameron", "The Godfather"
+    Priority 3: significant keyword fallback (len > 4, not stop words)
+
+    Any 4-digit year found in the question is appended to the result.
     """
+    year_match = _YEAR_RE.search(question)
+    year_suffix = f" {year_match.group(1)}" if year_match else ""
+
+    # Priority 1: quoted titles
+    quoted = _QUOTED_TITLE_RE.findall(question)
+    if quoted:
+        title = quoted[0].strip()
+        print(f"  [RAG-Entertainment] Quoted title: {title!r}")
+        return f"{title}{year_suffix}"
+
+    # Priority 2: multi-word proper nouns
+    proper = _PROPER_NOUN_RE.findall(question)
+    if proper:
+        entity = proper[0].strip()
+        print(f"  [RAG-Entertainment] Proper noun: {entity!r}")
+        return f"{entity}{year_suffix}"
+
+    # Priority 3: keyword fallback
+    keywords = _extract_keywords(question)
+    if keywords:
+        q = " ".join(keywords[:5])
+        print(f"  [RAG-Entertainment] Keyword fallback: {q!r}")
+        return f"{q}{year_suffix}"
+
+    return question
+
+
+def _fetch_ddg(ddg_query: str, num_results: int) -> list[str]:
+    """Fetch DuckDuckGo results; returns list of snippet strings."""
+    results = []
     try:
-        raw = generate_answer_fn(
-            _SEARCH_STRATEGY_SYSTEM,
-            f"Q: {question}",
-            max_new_tokens=30
-        )
-        subject, query = _parse_search_strategy(raw)
-
-        if not subject or subject.upper() == "NONE":
-            print(f"  [RAG-Entertainment] No subject. Query from LLM: {query!r}")
-            return query if query and len(query) > 3 else question
-
-        if " AND " in subject.upper():
-            parts = re.split(r'\s+AND\s+', subject, flags=re.I)
-            combined = " ".join(p.strip() for p in parts)
-            print(f"  [RAG-Entertainment] Multi-entity subject: {parts}")
-            # prefer LLM query; fall back to combined+question
-            return query if query and len(query) > 3 else f"{combined} {question}"[:120]
-
-        print(f"  [RAG-Entertainment] Subject: {subject!r}, Query: {query!r}")
-        return query if query and len(query) > 3 else f"{subject} {question}"[:120]
-
-    except Exception as e:
-        print(f"  [RAG-Entertainment] Strategy LLM call failed: {e}")
-        return question
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            for r in ddgs.text(ddg_query, max_results=num_results, timeout=3):
+                title = r.get("title", "")
+                body = r.get("body", "")
+                url = r.get("href", "")
+                if _is_quality_snippet(body, url):
+                    results.append(f"[{title}]{body}" if title else body)
+    except Exception as exc:
+        print(f"  [RAG-Entertainment] DDG failed: {exc}")
+    return results
 
 
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
     """
     Wikipedia + DuckDuckGo RAG for entertainment quiz questions.
+    `generate_answer_fn` is accepted for API compatibility but not used.
     """
     if _ARTICLE_REF_RE.search(query):
         print("  [RAG-Entertainment] Article-reference question — skipping search.")
         return ""
 
     # ------------------------------------------------------------------ #
-    # Stage 1: single fused LLM call for subject + query                  #
+    # Stage 1: regex-based query (no LLM call)                           #
     # ------------------------------------------------------------------ #
-    if generate_answer_fn is not None and _needs_subject_id(query):
-        ddg_query = _get_search_decision(query, generate_answer_fn)
-    else:
-        ddg_query = query
-        print(f"  [RAG-Entertainment] No subject ID needed. Query: {ddg_query!r}")
-
+    ddg_query = _build_query(query)
     print(f"  [RAG-Entertainment] Final search query: {ddg_query!r}")
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Wikipedia first, DDG fallback                              #
+    # Stage 2: Wikipedia + DDG in parallel, 4 s timeout each             #
     # ------------------------------------------------------------------ #
     snippets: list[str] = []
     seen: set[str] = set()
@@ -254,29 +203,36 @@ def rag_entertainment(query: str, num_results: int = 3,
             seen.add(text)
             snippets.append(text)
 
-    print(f"  [RAG-Entertainment] Trying Wikipedia...")
-    wiki_result = _wiki(ddg_query)
-    if _wiki_is_useful(wiki_result) and _is_relevant(wiki_result, query):
-        print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars), skipping DDG.")
-        _add(wiki_result)
-    else:
-        if wiki_result and not _is_relevant(wiki_result, query):
-            print(f"  [RAG-Entertainment] Wikipedia result not relevant, trying DDG too.")
-            _add(wiki_result)
-        else:
-            print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        wiki_fut = pool.submit(_wiki, ddg_query)
+        ddg_fut  = pool.submit(_fetch_ddg, ddg_query, num_results)
 
         try:
-            from ddgs import DDGS
-            with DDGS() as ddgs:
-                for r in ddgs.text(ddg_query, max_results=num_results, timeout=3):
-                    title = r.get("title", "")
-                    body = r.get("body", "")
-                    url = r.get("href", "")
-                    if _is_quality_snippet(body, url):
-                        _add(f"[{title}]{body}" if title else body)
+            wiki_result = wiki_fut.result(timeout=4)
+        except concurrent.futures.TimeoutError:
+            print("  [RAG-Entertainment] Wikipedia timed out.")
+            wiki_result = ""
         except Exception as exc:
-            print(f"  [RAG-Entertainment] DDG failed: {exc}")
+            print(f"  [RAG-Entertainment] Wikipedia error: {exc}")
+            wiki_result = ""
+
+        try:
+            ddg_results = ddg_fut.result(timeout=4)
+        except concurrent.futures.TimeoutError:
+            print("  [RAG-Entertainment] DDG timed out.")
+            ddg_results = []
+        except Exception as exc:
+            print(f"  [RAG-Entertainment] DDG error: {exc}")
+            ddg_results = []
+
+    if _wiki_is_useful(wiki_result):
+        print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars).")
+        _add(wiki_result)
+    else:
+        print("  [RAG-Entertainment] Wikipedia miss.")
+
+    for snippet in ddg_results:
+        _add(snippet)
 
     # ------------------------------------------------------------------ #
     # Stage 3: relevance filter with fail-safe                            #
@@ -286,8 +242,7 @@ def rag_entertainment(query: str, num_results: int = 3,
         if relevant:
             snippets = relevant
         else:
-            # fail-safe: return best-effort top-2 rather than nothing
-            print(f"  [RAG-Entertainment] No relevant snippets — using best-effort top-2.")
+            print("  [RAG-Entertainment] No relevant snippets — using best-effort top-2.")
             snippets = snippets[:2]
 
-    return "\n\n".join(snippets)[:3000] if snippets else ""
+    return "\n\n".join(snippets)[:1500] if snippets else ""
