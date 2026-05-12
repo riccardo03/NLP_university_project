@@ -7,9 +7,9 @@ import re
 import concurrent.futures
 
 _ARTICLE_REF_RE = re.compile(
-    r'\baccording to (the article|the text|the passage)\b', re.I
+    r'\b(according to|as described in|as stated in|based on|per) '
+    r'(the article|the text|the passage|the excerpt)\b', re.I
 )
-
 _LOW_QUALITY_SIGNALS = [
     r'\d{4}\s*[·•]\s',   # "Jun 12, 2018 ·" — dated blog format
     r'click here',
@@ -19,6 +19,8 @@ _LOW_QUALITY_SIGNALS = [
     r'\.\.\.read',
     r'youtube\.com',
     r'goo\.gl',
+    r'fandom\.com',    
+    r'wikia\.com', 
 ]
 
 _TRUSTED_DOMAINS = {
@@ -48,6 +50,8 @@ _QUERY_GEN_SYSTEM = (
     "- Output ONLY the query string. No punctuation at the end. No explanation.\n"
     "\n"
     "Examples:\n"
+    "Question: Katharine Hepburn career spanning six decades variety of roles → "
+    "Katharine Hepburn versatility roles career\n"
     "Question: James Cameron James Cameron primary reason switched physics English → "
     "James Cameron biography early career\n"
     "Question: The Godfather The Godfather director who directed → "
@@ -95,7 +99,7 @@ _SUBJECT_TRIGGERS = re.compile(
 _PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
 _POSSESSIVE_PROPER_RE = re.compile(r"\b([A-Z][a-z]{2,})'s\b")
 _SINGLE_NAME_RE = re.compile(
-    r'\b(?:between|behind|describes|about|by|for|of|with|from)\s+([A-Z][a-z]{2,})\b'
+    r'\b(?:between|behind|describes|about|by|for|of|with|from|in|on)\s+([A-Z][a-z]{2,})\b'
 )
 
 def _needs_subject_id(question: str) -> bool:
