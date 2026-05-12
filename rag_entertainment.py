@@ -72,12 +72,11 @@ _SUBJECT_IDENTIFICATION_SYSTEM = (
     "that the question is ABOUT. "
     "\n\n"
     "Rules:\n"
-    "- Output ONLY the entity name, as short as possible (1-4 words).\n"
-    "- If the question is about a concept, relationship, or process with NO named entity, "
-    "output exactly: NONE\n"
+    "- If the question is about ONE entity, output just that entity (1-4 words).\n"
+    "- If the question asks about the RELATIONSHIP between two entities, "
+    "output BOTH separated by ' AND ': e.g. 'Hey Joe AND Purple Haze'\n"
+    "- If the question is about a concept with NO named entity, output: NONE\n"
     "- Never output a full sentence. Never explain.\n"
-    "- If multiple entities appear, pick the one the question is primarily asking about.\n"
-    "\n"
     "Examples:\n"
     "Q: What was the primary reason James Cameron switched from physics to English? → James Cameron\n"
     "Q: Who directed The Godfather? → The Godfather\n"
@@ -211,14 +210,20 @@ def rag_entertainment(query: str, num_results: int = 3,
                 if subject.upper() == "NONE" or len(subject) < 3:
                      print("  [RAG-Entertainment] No subject identified, using raw query.")
                      ddg_query = query
+                elif " AND " in subject.upper():
+    # relationship question — use both entities as the search anchor
+                     parts = re.split(r'\s+AND\s+', subject, flags=re.I)
+                     combined = " ".join(p.strip() for p in parts)
+                     print(f"  [RAG-Entertainment] Multi-entity subject: {parts}")
+                     anchored_query = f"{combined} {query}"[:120]
                 else:
                      subject = subject.strip('"').strip("'")
                      print(f"  [RAG-Entertainment] Identified subject: {subject!r}")
 
-                anchored_query = f"{subject} {query}"[:120]
-                user_msg = f"Question: {anchored_query}"
-                raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=15)
-                distilled = raw.strip().strip('"').strip("'")
+                     anchored_query = f"{subject} {query}"[:120]
+                     user_msg = f"Question: {anchored_query}"
+                     raw = generate_answer_fn(_QUERY_GEN_SYSTEM, user_msg, max_new_tokens=15)
+                     distilled = raw.strip().strip('"').strip("'")
 
                 if distilled and len(distilled) > 3:
                     ddg_query = distilled
