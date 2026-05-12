@@ -126,7 +126,9 @@ def _is_relevant(snippet: str, question: str) -> bool:
     return matches >= 2
 
 
-_QUOTED_TITLE_RE = re.compile(r"""['"]([^'"]{2,60}?)['"]""")
+_QUOTED_TITLE_RE = re.compile(r"""(?<!\w)['"]([\w][\w\s,\.\-]{1,58}?)['"]""")
+_CAMEL_CASE_RE = re.compile(r'\b([A-Z][a-z]+[A-Z][a-zA-Z]+)\b')
+_QUESTION_WORDS = re.compile(r'^(Which|What|How|Who|When|Where|Why)$')
 _YEAR_RE = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
 
 
@@ -155,6 +157,13 @@ def _build_query(question: str) -> str:
     if proper:
         entity = proper[0].strip()
         print(f"  [RAG-Entertainment] Proper noun: {entity!r}")
+        return f"{entity}{year_suffix}"
+
+    # Priority 2b: CamelCase single token (e.g. LazyTown, YouTube, TikTok)
+    camel = [m for m in _CAMEL_CASE_RE.findall(question) if not _QUESTION_WORDS.match(m)]
+    if camel:
+        entity = camel[0]
+        print(f"  [RAG-Entertainment] CamelCase token: {entity!r}")
         return f"{entity}{year_suffix}"
 
     # Priority 3: keyword fallback
