@@ -71,28 +71,52 @@ def _build_wiki_query(query: str) -> str:
     return query
 
 
+_WIKI_UA = "PoliMillionaireBot/1.0 (university project; python-wikipedia)"
+
+
+def _wiki_rest_fallback(title: str) -> str:
+    """Direct Wikipedia REST API — more permissive than the action API."""
+    try:
+        import urllib.parse
+        import requests
+        encoded = urllib.parse.quote(title, safe="")
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded}"
+        resp = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
+        if resp.status_code == 200:
+            return resp.json().get("extract", "")[:1200]
+    except Exception:
+        pass
+    return ""
+
+
 def _wiki(query: str) -> str:
     """
     Two-step Wikipedia fetch: search() for a title, then page() for content.
-    Returns '' on any failure.
+    Falls back to the REST summary API if the python package fails.
+    Returns '' only if both paths fail.
     """
+    title = query  # used by the REST fallback even if the package path fails early
     try:
         import wikipedia
         wikipedia.set_lang("en")
+        wikipedia.set_user_agent(_WIKI_UA)
 
         titles = wikipedia.search(query, results=3)
         if not titles:
-            return ""
+            print(f"  [RAG-Entertainment] Wikipedia search empty for {query!r}, trying REST.")
+            return _wiki_rest_fallback(query)
         title = titles[0]
 
         try:
             page = wikipedia.page(title, auto_suggest=False)
         except wikipedia.exceptions.DisambiguationError as e:
             if not e.options:
-                return ""
+                return _wiki_rest_fallback(title)
             page = wikipedia.page(e.options[0], auto_suggest=False)
-        except wikipedia.exceptions.PageError:
-            return ""
+            title = e.options[0]
+        except Exception:
+            print(f"  [RAG-Entertainment] wikipedia.page() failed for {title!r}, trying REST.")
+            return _wiki_rest_fallback(title)
 
         summary = wikipedia.summary(title, sentences=4, auto_suggest=False)
         paragraphs = [
@@ -104,7 +128,8 @@ def _wiki(query: str) -> str:
         return combined[:1200]
 
     except Exception:
-        return ""
+        print(f"  [RAG-Entertainment] Wikipedia package failed for {query!r}, trying REST.")
+        return _wiki_rest_fallback(title)
 
 def _wiki_is_useful(text: str) -> bool:
     if not text or len(text.strip()) < 200:
