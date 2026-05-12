@@ -131,7 +131,7 @@ def _get_search_decision(query: str, generate_answer_fn) -> tuple[str, str]:
         raw = generate_answer_fn(
             _QUERY_DECISION_SYSTEM,
             f"Q: {query}",
-            max_new_tokens=100
+            max_new_tokens=80
         ).strip()
 
         lines = [l.strip() for l in raw.split('\n') if l.strip()]
