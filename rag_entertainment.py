@@ -10,6 +10,28 @@ _ARTICLE_REF_RE = re.compile(
     r'\baccording to (the article|the text|the passage)\b', re.I
 )
 
+_LOW_QUALITY_SIGNALS = [
+    r'\d{4}\s*[·•]\s',   # "Jun 12, 2018 ·" — dated blog format
+    r'click here',
+    r'subscribe',
+    r'read more',
+    r'sign up',
+    r'\.\.\.read',
+    r'youtube\.com',
+    r'goo\.gl',
+]
+
+_TRUSTED_DOMAINS = {
+    "wikipedia.org",
+    "britannica.com",
+    "imdb.com",
+    "allmusic.com",
+    "rottentomatoes.com",
+    "biography.com",
+    "rollingstone.com",
+    "billboard.com",
+}
+
 _QUERY_GEN_SYSTEM = (
     "You are a search-query generator for an entertainment trivia bot. "
     "Given a question (already anchored to its subject), output a SHORT search query "
@@ -72,6 +94,9 @@ _SUBJECT_TRIGGERS = re.compile(
 
 _PROPER_NOUN_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)')
 _POSSESSIVE_PROPER_RE = re.compile(r"\b([A-Z][a-z]{2,})'s\b")
+_SINGLE_NAME_RE = re.compile(
+    r'\b(?:between|behind|describes|about|by|for|of|with|from)\s+([A-Z][a-z]{2,})\b'
+)
 
 def _needs_subject_id(question: str) -> bool:
     if _SUBJECT_TRIGGERS.search(question):
@@ -80,7 +105,27 @@ def _needs_subject_id(question: str) -> bool:
         return True
     if _POSSESSIVE_PROPER_RE.findall(question):
         return True
+    if _SINGLE_NAME_RE.findall(question):
+        return True
     return False
+
+def _is_quality_snippet(text: str, url: str = "") -> bool:
+    if not text or len(text.strip()) < 80:
+        return False
+
+    text_lower = text.lower()
+    for pattern in _LOW_QUALITY_SIGNALS:
+        if re.search(pattern, text_lower):
+            return False
+
+    # fast-pass trusted domains
+    if url:
+        domain = re.search(r'https?://(?:www\.)?([^/]+)', url)
+        if domain and any(t in domain.group(1) for t in _TRUSTED_DOMAINS):
+            return True
+
+    return True
+
 
 
 def _wiki(query: str, sentences: int = 5) -> str:
@@ -89,7 +134,16 @@ def _wiki(query: str, sentences: int = 5) -> str:
         import wikipedia
         wikipedia.set_lang("en")
         try:
-            return wikipedia.summary(query, sentences=sentences, auto_suggest=True)
+            page = wikipedia.page(query, auto_suggest=True)
+            summary = wikipedia.summary(query, sentences=sentences, auto_suggest=True)
+            paragraphs = [
+                p.strip() for p in page.content.split("\n")
+                if len(p.strip()) > 100
+            ]
+            extra = "\n\n".join(paragraphs[:4])
+
+            combined = f"{summary}\n\n{extra}"
+            return combined[:3000]
         except wikipedia.exceptions.DisambiguationError as e:
             return wikipedia.summary(e.options[0], sentences=sentences)
         except wikipedia.exceptions.PageError:
@@ -97,6 +151,16 @@ def _wiki(query: str, sentences: int = 5) -> str:
     except Exception:
         return ""
 
+def _wiki_is_useful(text: str) -> bool:
+    """
+    Return True if the Wikipedia result is substantial enough to use.
+    Filters out disambiguation pages, stubs, and empty results.
+    """
+    if not text or len(text.strip()) < 200:
+        return False
+    if "may refer to:" in text.lower():
+        return False
+    return True
 
 def _extract_keywords(text: str) -> list[str]:
     words = re.findall(r'\b[a-z]{4,}\b', text.lower())
@@ -166,61 +230,28 @@ def rag_entertainment(query: str, num_results: int = 3,
             seen.add(text)
             snippets.append(text)
 
-    # ------------------------------------------------------------------ #
-    # Stage 2a: Wikipedia — main query + one lookup per named-entity option#
-    # ------------------------------------------------------------------ #
-    def _fetch_wiki_main():
-        return _wiki(ddg_query, sentences=10)
 
-    # ------------------------------------------------------------------ #
-    # Stage 2b: DDG — main query + one search per option                   #
-    # ------------------------------------------------------------------ #
-    def _fetch_ddg_main():
-        from ddgs import DDGS
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(ddg_query, max_results=num_results, timeout=8):
-                title = r.get("title", "")
-                body  = r.get("body",  "")
-                if body:
-                    results.append(f"{body} (fonte: {title})" if title else body)
-        return results
+    print(f"  [RAG-Entertainment] Trying Wikipedia...")
+    wiki_result = _wiki(ddg_query)
+    if _wiki_is_useful(wiki_result):
+        print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars), skipping DDG.")
+        _add(wiki_result)
+    else:
+        print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
+        try:
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                for r in ddgs.text(ddg_query, max_results=num_results, timeout=8):
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    url = r.get("href", "")
+                    if _is_quality_snippet(body, url):
+                        _add(f"[{title}]{body}" if title else {body})
+        except Exception as exc:
+            print(f"  [RAG-Entertainment] DDG failed: {exc}")
 
+        if snippets:
+            relevant = [s for s in snippets if _is_relevant(s, query)]
+            snippets = relevant if relevant else snippets
 
-    # ------------------------------------------------------------------ #
-    # Stage 3: run everything in parallel                                  #
-    # ------------------------------------------------------------------ #
-    futures = []
-    try:
-        # +2 for main wiki + main DDG; +len(entity_options) wiki; +len(options) DDG
-        max_workers = 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures.append(pool.submit(_fetch_wiki_main))
-            futures.append(pool.submit(_fetch_ddg_main))
-
-            for fut in concurrent.futures.as_completed(futures, timeout=15):
-                try:
-                    result = fut.result()
-                except Exception:
-                    continue
-                if isinstance(result, list):
-                    for s in result:
-                        _add(s)
-                else:
-                    _add(result)
-
-    except concurrent.futures.TimeoutError:
-        print("  [RAG-Entertainment] Timed out.")
-    except Exception as exc:
-        print(f"  [RAG-Entertainment] Failed: {exc}")
-
-    # ------------------------------------------------------------------ #
-    # Stage 4: filter — keep only snippets relevant to at least one option #
-    # ------------------------------------------------------------------ #
-    if option_texts:
-        relevant = [s for s in snippets if _is_relevant(s, " ".join(option_texts))]
-        # Fall back to all snippets if filtering removed everything
-        snippets = relevant if relevant else snippets
-
-    context = "\n\n".join(snippets)
-    return context[:4000] if context else ""
+    return "\n\n".join(snippets)[:3500] if snippets else ""

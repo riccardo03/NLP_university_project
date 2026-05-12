@@ -109,10 +109,14 @@ SYSTEM_PROMPTS = {
     "box office records, and cultural trivia across all decades and regions. "
 
     # Ucontext
-    "When context is provided, prioritize it over your own knowledge — "
-    "especially when it contains specific facts, dates, or biographical details. "
-    "Only override the context if it is clearly irrelevant to the question being asked. "
-
+    "When context is provided, you MUST base your answer on it. "
+    "Read the context carefully before considering any option. "
+    "If the context contains a sentence or phrase that directly matches or "
+    "supports one of the options, choose that option — even if your own knowledge "
+    "would suggest a different answer. "
+    "Only ignore the context if it is about a completely different topic than "
+    "the question. "
+    
     # logical/relational questions
     "When the question involves a logical relationship (superset, subset, "
     "cause/effect, before/after, part/whole), think step by step about the "
