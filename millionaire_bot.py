@@ -9,6 +9,7 @@ import warnings
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline
 from transformers import logging as transformers_logging
+from transformers import BitsAndBytesConfig
 
 from rag_entertainment import rag_entertainment
 from rag_history      import rag_history
@@ -43,13 +44,13 @@ _MAX_TOKENS = {
 
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
-
+    quantization_config = BitsAndBytesConfig(load_in_4bit=True)
     print(f"Loading model: {model_name}")
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
-        torch_dtype=torch.float16,
+        quantization_config=quantization_config,
         trust_remote_code=True,
     )
     _model.config.max_length = None

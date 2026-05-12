@@ -187,7 +187,7 @@ def _build_query(question: str) -> tuple[str, int | str]:
     # Priority 1: quoted titles
     quoted = _QUOTED_TITLE_RE.findall(question)
     if quoted:
-        title = quoted[0].strip()
+        title = max(quoted, key=len).strip()
         print(f"  [RAG-Entertainment] Quoted title: {title!r}")
         return f"{title}{year_suffix}", 1
 
