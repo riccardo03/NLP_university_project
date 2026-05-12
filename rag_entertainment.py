@@ -42,8 +42,14 @@ _STOP_WORDS = {
     "been", "were", "would", "could", "should", "according"
 }
 
-# [A-Z][a-zA-Z]+ handles mixed-case surnames like McCartney, McDonald
-_PROPER_NOUN_RE = re.compile(r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)')
+# Unicode letter range covers accented names like Beyoncé, Björk
+_UL = r'A-ZÀ-ÖØ-Ý'   # uppercase Unicode letters
+_AL = r'a-zA-ZÀ-ÖØ-öø-ÿ'  # all-case Unicode letters
+
+# Multi-word proper noun: two or more Title-Case/mixed-case words
+_PROPER_NOUN_RE = re.compile(
+    rf'([{_UL}][{_AL}]+(?:\s+[{_UL}][{_AL}]+)+)'
+)
 
 def _is_quality_snippet(text: str, url: str = "") -> bool:
     if not text or len(text.strip()) < 80:
@@ -127,9 +133,26 @@ def _is_relevant(snippet: str, question: str) -> bool:
 
 
 _QUOTED_TITLE_RE = re.compile(r"""(?<!\w)['"]([\w][\w\s,\.\-]{1,58}?)['"]""")
-_CAMEL_CASE_RE = re.compile(r'\b([A-Z][a-z]+[A-Z][a-zA-Z]+)\b')
+_CAMEL_CASE_RE = re.compile(rf'\b([{_UL}][{_AL.replace("A-Z", "")}]+[{_UL}][{_AL}]+)\b')
 _QUESTION_WORDS = re.compile(r'^(Which|What|How|Who|When|Where|Why)$')
 _YEAR_RE = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
+
+# Words that look title-case but are not entity names
+TITLE_STOP = {
+    "Which", "What", "How", "Who", "When", "Where", "Why",
+    "The", "This", "That", "These", "Those", "A", "An",
+    "Is", "Are", "Was", "Were", "Has", "Have", "Had",
+    "Does", "Do", "Did", "Will", "Would", "Could", "Should",
+    "According", "Following", "Best", "Most", "First", "Last",
+    "Film", "Song", "Show", "Role", "Style", "Music", "Band",
+    "Album", "Movie", "Book", "Character", "Actor", "Director",
+    "Describes", "Describe", "Known", "Used", "Made", "Played",
+    "Between", "During", "After", "Before", "About", "Into",
+}
+_TITLE_STOP_LOWER = {w.lower() for w in TITLE_STOP}
+
+# Single title-case word (Unicode-aware), min 3 chars
+_SINGLE_PROPER_RE = re.compile(rf'\b([{_UL}][{_AL}]{{2,}})\b')
 
 
 def _build_query(question: str) -> tuple[str, int | str]:
@@ -139,8 +162,9 @@ def _build_query(question: str) -> tuple[str, int | str]:
 
     Priority 1:  quoted titles  e.g. 'Thriller', "E.T."
     Priority 2:  multi-word proper nouns  e.g. "James Cameron", "The Godfather"
+    Priority 2c: single title-case proper noun  e.g. Chaplin, Beyoncé (NEW)
     Priority 2b: CamelCase single token  e.g. LazyTown, YouTube
-    Priority 3:  significant keyword fallback (len > 4, not stop words)
+    Priority 3:  significant keyword fallback (improved filtering)
 
     Any 4-digit year found in the question is appended to the result.
     """
@@ -161,6 +185,23 @@ def _build_query(question: str) -> tuple[str, int | str]:
         print(f"  [RAG-Entertainment] Proper noun: {entity!r}")
         return f"{entity}{year_suffix}", 2
 
+    # Priority 2c: single title-case word not in stop set; skip sentence-initial word
+    # Prefer words that appear with a possessive 's (strong name signal)
+    words = question.split()
+    possessive_names = re.findall(
+        rf"\b([{_UL}][{_AL}]{{2,}})'s\b", question
+    )
+    single_candidates = [
+        m for m in _SINGLE_PROPER_RE.findall(question)
+        if m not in TITLE_STOP and m != words[0]
+    ]
+    # Possessive names first, then remaining candidates
+    ordered = list(dict.fromkeys(possessive_names + single_candidates))
+    if ordered:
+        entity = ordered[0]
+        print(f"  [RAG-Entertainment] Single proper noun: {entity!r}")
+        return f"{entity}{year_suffix}", "2c"
+
     # Priority 2b: CamelCase single token (e.g. LazyTown, YouTube, TikTok)
     camel = [m for m in _CAMEL_CASE_RE.findall(question) if not _QUESTION_WORDS.match(m)]
     if camel:
@@ -168,14 +209,19 @@ def _build_query(question: str) -> tuple[str, int | str]:
         print(f"  [RAG-Entertainment] CamelCase token: {entity!r}")
         return f"{entity}{year_suffix}", "2b"
 
-    # Priority 3: keyword fallback
-    keywords = _extract_keywords(question)
-    if keywords:
+    # Priority 3: keyword fallback — filter stop words and short tokens aggressively
+    keywords = [
+        kw for kw in _extract_keywords(question)
+        if len(kw) >= 5 and kw not in _TITLE_STOP_LOWER
+    ]
+    if len(keywords) >= 2:
         q = " ".join(keywords[:5])
         print(f"  [RAG-Entertainment] Keyword fallback: {q!r}")
         return f"{q}{year_suffix}", 3
 
-    return question, 3
+    # Last resort: raw question capped at 80 chars
+    print(f"  [RAG-Entertainment] Raw question fallback")
+    return question[:80], 3
 
 
 def _build_ddg_query(entity: str, question: str) -> str:
@@ -220,8 +266,8 @@ def rag_entertainment(query: str, num_results: int = 3,
     # Stage 1: regex-based query (no LLM call)                           #
     # ------------------------------------------------------------------ #
     base_query, priority = _build_query(query)
-    wiki_query = _build_wiki_query(base_query)
-    if priority in (2, "2b"):
+    wiki_query = _build_wiki_query(base_query)  # entity-only (string)
+    if priority in (2, "2c", "2b"):
         ddg_query = _build_ddg_query(wiki_query, query)
     else:
         ddg_query = base_query
