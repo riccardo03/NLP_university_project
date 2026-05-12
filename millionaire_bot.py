@@ -31,7 +31,7 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    20,
+    COMP_ENTERTAINMENT:    50,
     COMP_HISTORY_POLITICS: 10,
     COMP_SCIENCE_NATURE:   40,
     COMP_MATHS:            40,
@@ -75,19 +75,15 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    do_sample   = kwargs.pop("do_sample", False)
-    temperature = kwargs.pop("temperature", 1.0)
-    gen_kwargs  = dict(
+    do_sample   = False
+    temperature = 0.1
+    outputs = _pipe(
+        messages,
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
-        return_full_text=False,
-        **kwargs,
+        temperature=temperature,
     )
-    if do_sample:
-        gen_kwargs["temperature"] = temperature
- 
-    outputs = _pipe(messages, **gen_kwargs)
-   
+
     result = outputs[0]["generated_text"]
     if isinstance(result, str):
         return result.strip()
