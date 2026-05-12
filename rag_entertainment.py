@@ -83,20 +83,66 @@ import requests
 _WIKI_UA = "PoliMillionaireBot/1.0 (university research project)"
 
 
-def _wiki(query: str) -> str:
-    """Wikipedia REST summary API — fast, no package dependency."""
-    title = urllib.parse.quote(query, safe="")
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+_CITE_RE = re.compile(r'\[\d+\]')
+
+
+def _wiki_summary(title_enc: str) -> str:
+    """REST summary — fast existence check and first 2-3 sentences."""
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title_enc}"
+    r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
+    if r.status_code == 200:
+        return r.json().get("extract", "")
+    return ""
+
+
+def _wiki_full(title: str) -> str:
+    """MediaWiki action API — full plain-text article extract."""
+    url = (
+        "https://en.wikipedia.org/w/api.php"
+        f"?action=query&prop=extracts&exintro=false&explaintext=true"
+        f"&titles={urllib.parse.quote(title)}&format=json"
+    )
     try:
         r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
         if r.status_code == 200:
-            return r.json().get("extract", "")[:1200]
+            pages = r.json()["query"]["pages"]
+            pid = next(iter(pages))
+            return _CITE_RE.sub("", pages[pid].get("extract", ""))
     except Exception:
         pass
     return ""
 
+
+def _wiki(query: str) -> str:
+    """
+    Two-tier Wikipedia fetch run in parallel:
+      Tier 1 — REST summary  (fast, ~0.3 s): existence check
+      Tier 2 — action API    (full text, ~1 s): biographical detail
+    Returns "" if the article doesn't exist (summary < 200 chars).
+    """
+    title_enc = urllib.parse.quote(query, safe="")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        summary_fut = pool.submit(_wiki_summary, title_enc)
+        full_fut    = pool.submit(_wiki_full,    query)
+        try:
+            summary = summary_fut.result(timeout=4)
+        except Exception:
+            summary = ""
+        try:
+            full = full_fut.result(timeout=4)
+        except Exception:
+            full = ""
+
+    if len(summary) < 200:
+        return summary  # stub or missing — caller checks _wiki_is_useful
+
+    # Prefer full article text; fall back to summary alone
+    combined = full[:2000] if len(full) > len(summary) else summary
+    return combined[:2000]
+
+
 def _wiki_is_useful(text: str) -> bool:
-    if not text or len(text.strip()) < 200:
+    if not text or len(text.strip()) < 100:
         return False
     if "may refer to:" in text.lower():
         return False
