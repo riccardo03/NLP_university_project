@@ -174,6 +174,9 @@ def _is_relevant(snippet: str, question: str) -> bool:
     matches = sum(1 for kw in keywords if kw in snippet_lower)
     # require at least 2 question keywords to appear
     return matches >= 2
+
+
+
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
     """
@@ -233,11 +236,19 @@ def rag_entertainment(query: str, num_results: int = 3,
 
     print(f"  [RAG-Entertainment] Trying Wikipedia...")
     wiki_result = _wiki(ddg_query)
-    if _wiki_is_useful(wiki_result):
+    if _wiki_is_useful(wiki_result) and _is_relevant(wiki_result, query):
+    # Wikipedia is both substantial AND relevant to this question
         print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars), skipping DDG.")
         _add(wiki_result)
+
     else:
-        print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
+        if wiki_result and not _is_relevant(wiki_result, query):
+        # Wikipedia found something but it's off-topic — still try DDG
+             print(f"  [RAG-Entertainment] Wikipedia result not relevant, trying DDG too.")
+             _add(wiki_result)  # keep it as weak signal
+        else:
+             print(f"  [RAG-Entertainment] Wikipedia miss, falling back to DDG.")
+
         try:
             from ddgs import DDGS
             with DDGS() as ddgs:

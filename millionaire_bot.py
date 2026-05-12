@@ -108,15 +108,17 @@ SYSTEM_PROMPTS = {
     "You have encyclopedic knowledge of release dates, awards, chart positions, "
     "box office records, and cultural trivia across all decades and regions. "
 
-    # Ucontext
+    #  context
     "When context is provided, you MUST base your answer on it. "
     "Read the context carefully before considering any option. "
     "If the context contains a sentence or phrase that directly matches or "
     "supports one of the options, choose that option — even if your own knowledge "
     "would suggest a different answer. "
-    "Only ignore the context if it is about a completely different topic than "
-    "the question. "
-    
+    "Only ignore the context if it does not contain any information specifically "
+    "relevant to the question being asked — not just the general subject, but "
+    "the specific fact, event, or relationship the question is about. "
+    "In that case, answer from your own knowledge. "
+
     # logical/relational questions
     "When the question involves a logical relationship (superset, subset, "
     "cause/effect, before/after, part/whole), think step by step about the "
