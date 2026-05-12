@@ -71,65 +71,23 @@ def _build_wiki_query(query: str) -> str:
     return query
 
 
-_WIKI_UA = "PoliMillionaireBot/1.0 (university project; python-wikipedia)"
+import urllib.parse
+import requests
 
-
-def _wiki_rest_fallback(title: str) -> str:
-    """Direct Wikipedia REST API — more permissive than the action API."""
-    try:
-        import urllib.parse
-        import requests
-        encoded = urllib.parse.quote(title, safe="")
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded}"
-        resp = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
-        if resp.status_code == 200:
-            return resp.json().get("extract", "")[:1200]
-    except Exception:
-        pass
-    return ""
+_WIKI_UA = "PoliMillionaireBot/1.0 (university research project)"
 
 
 def _wiki(query: str) -> str:
-    """
-    Two-step Wikipedia fetch: search() for a title, then page() for content.
-    Falls back to the REST summary API if the python package fails.
-    Returns '' only if both paths fail.
-    """
-    title = query  # used by the REST fallback even if the package path fails early
+    """Wikipedia REST summary API — fast, no package dependency."""
+    title = urllib.parse.quote(query, safe="")
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
     try:
-        import wikipedia
-        wikipedia.set_lang("en")
-        wikipedia.set_user_agent(_WIKI_UA)
-
-        titles = wikipedia.search(query, results=3)
-        if not titles:
-            print(f"  [RAG-Entertainment] Wikipedia search empty for {query!r}, trying REST.")
-            return _wiki_rest_fallback(query)
-        title = titles[0]
-
-        try:
-            page = wikipedia.page(title, auto_suggest=False)
-        except wikipedia.exceptions.DisambiguationError as e:
-            if not e.options:
-                return _wiki_rest_fallback(title)
-            page = wikipedia.page(e.options[0], auto_suggest=False)
-            title = e.options[0]
-        except Exception:
-            print(f"  [RAG-Entertainment] wikipedia.page() failed for {title!r}, trying REST.")
-            return _wiki_rest_fallback(title)
-
-        summary = wikipedia.summary(title, sentences=4, auto_suggest=False)
-        paragraphs = [
-            p.strip() for p in page.content.split("\n")
-            if len(p.strip()) > 120
-        ]
-        extra = "\n\n".join(paragraphs[:2])
-        combined = f"{summary}\n\n{extra}" if extra else summary
-        return combined[:1200]
-
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
+        if r.status_code == 200:
+            return r.json().get("extract", "")[:1200]
     except Exception:
-        print(f"  [RAG-Entertainment] Wikipedia package failed for {query!r}, trying REST.")
-        return _wiki_rest_fallback(title)
+        pass
+    return ""
 
 def _wiki_is_useful(text: str) -> bool:
     if not text or len(text.strip()) < 200:
@@ -254,27 +212,23 @@ def rag_entertainment(query: str, num_results: int = 3,
             seen.add(text)
             snippets.append(text)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        wiki_fut = pool.submit(_wiki, wiki_query)
-        ddg_fut  = pool.submit(_fetch_ddg, ddg_query, num_results)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    wiki_fut = pool.submit(_wiki, wiki_query)
+    ddg_fut  = pool.submit(_fetch_ddg, ddg_query, num_results)
 
-        try:
-            wiki_result = wiki_fut.result(timeout=4)
-        except concurrent.futures.TimeoutError:
-            print("  [RAG-Entertainment] Wikipedia timed out.")
-            wiki_result = ""
-        except Exception as exc:
-            print(f"  [RAG-Entertainment] Wikipedia error: {exc}")
-            wiki_result = ""
+    try:
+        wiki_result = wiki_fut.result(timeout=4)
+    except Exception:
+        wiki_result = ""
+        print("  [RAG-Entertainment] Wikipedia timed out.")
 
-        try:
-            ddg_results = ddg_fut.result(timeout=4)
-        except concurrent.futures.TimeoutError:
-            print("  [RAG-Entertainment] DDG timed out.")
-            ddg_results = []
-        except Exception as exc:
-            print(f"  [RAG-Entertainment] DDG error: {exc}")
-            ddg_results = []
+    try:
+        ddg_results = ddg_fut.result(timeout=4)
+    except Exception:
+        ddg_results = []
+        print("  [RAG-Entertainment] DDG timed out.")
+
+    pool.shutdown(wait=False)
 
     if _wiki_is_useful(wiki_result):
         print(f"  [RAG-Entertainment] Wikipedia hit ({len(wiki_result)} chars).")
