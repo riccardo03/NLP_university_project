@@ -209,7 +209,7 @@ def rag_entertainment(query: str, num_results: int = 3,
     # Stage 4: filter — keep only snippets relevant to at least one option #
     # ------------------------------------------------------------------ #
     if option_texts:
-        relevant = [s for s in snippets if _is_relevant(s, option_texts)]
+        relevant = [s for s in snippets if _is_relevant(s, " ".join(option_texts))]
         # Fall back to all snippets if filtering removed everything
         snippets = relevant if relevant else snippets
 
