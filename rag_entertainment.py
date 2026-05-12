@@ -132,13 +132,15 @@ _QUESTION_WORDS = re.compile(r'^(Which|What|How|Who|When|Where|Why)$')
 _YEAR_RE = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
 
 
-def _build_query(question: str) -> str:
+def _build_query(question: str) -> tuple[str, int | str]:
     """
     Pure-regex query builder — no LLM call.
+    Returns (query, priority) where priority is 1, 2, '2b', or 3.
 
-    Priority 1: quoted titles  e.g. 'Thriller', "E.T."
-    Priority 2: multi-word proper nouns  e.g. "James Cameron", "The Godfather"
-    Priority 3: significant keyword fallback (len > 4, not stop words)
+    Priority 1:  quoted titles  e.g. 'Thriller', "E.T."
+    Priority 2:  multi-word proper nouns  e.g. "James Cameron", "The Godfather"
+    Priority 2b: CamelCase single token  e.g. LazyTown, YouTube
+    Priority 3:  significant keyword fallback (len > 4, not stop words)
 
     Any 4-digit year found in the question is appended to the result.
     """
@@ -150,30 +152,41 @@ def _build_query(question: str) -> str:
     if quoted:
         title = quoted[0].strip()
         print(f"  [RAG-Entertainment] Quoted title: {title!r}")
-        return f"{title}{year_suffix}"
+        return f"{title}{year_suffix}", 1
 
     # Priority 2: multi-word proper nouns
     proper = _PROPER_NOUN_RE.findall(question)
     if proper:
         entity = proper[0].strip()
         print(f"  [RAG-Entertainment] Proper noun: {entity!r}")
-        return f"{entity}{year_suffix}"
+        return f"{entity}{year_suffix}", 2
 
     # Priority 2b: CamelCase single token (e.g. LazyTown, YouTube, TikTok)
     camel = [m for m in _CAMEL_CASE_RE.findall(question) if not _QUESTION_WORDS.match(m)]
     if camel:
         entity = camel[0]
         print(f"  [RAG-Entertainment] CamelCase token: {entity!r}")
-        return f"{entity}{year_suffix}"
+        return f"{entity}{year_suffix}", "2b"
 
     # Priority 3: keyword fallback
     keywords = _extract_keywords(question)
     if keywords:
         q = " ".join(keywords[:5])
         print(f"  [RAG-Entertainment] Keyword fallback: {q!r}")
-        return f"{q}{year_suffix}"
+        return f"{q}{year_suffix}", 3
 
-    return question
+    return question, 3
+
+
+def _build_ddg_query(entity: str, question: str) -> str:
+    """
+    Enrich an entity name with context keywords from the question for DDG.
+    Removes words already present in the entity to avoid redundancy.
+    """
+    entity_words = set(entity.lower().split())
+    extra = [kw for kw in _extract_keywords(question) if kw not in entity_words]
+    combined = f"{entity} {' '.join(extra[:3])}"
+    return combined.strip()[:80]
 
 
 def _fetch_ddg(ddg_query: str, num_results: int) -> list[str]:
@@ -206,9 +219,13 @@ def rag_entertainment(query: str, num_results: int = 3,
     # ------------------------------------------------------------------ #
     # Stage 1: regex-based query (no LLM call)                           #
     # ------------------------------------------------------------------ #
-    ddg_query  = _build_query(query)
-    wiki_query = _build_wiki_query(ddg_query)
-    print(f"  [RAG-Entertainment] DDG query: {ddg_query!r}  Wiki query: {wiki_query!r}")
+    base_query, priority = _build_query(query)
+    wiki_query = _build_wiki_query(base_query)
+    if priority in (2, "2b"):
+        ddg_query = _build_ddg_query(wiki_query, query)
+    else:
+        ddg_query = base_query
+    print(f"  [RAG-Entertainment] P{priority} wiki={wiki_query!r}  ddg={ddg_query!r}")
 
     # ------------------------------------------------------------------ #
     # Stage 2: Wikipedia + DDG in parallel, 4 s timeout each             #
