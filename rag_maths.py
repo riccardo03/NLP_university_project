@@ -357,18 +357,25 @@ def _extract_concept(question: str, category: str) -> str:
     """
     q_lower = question.lower()
     
-    # Pattern-based concept extraction
+    # Pattern-based concept extraction (ordered by specificity)
     concept_map = {
-        # Statistics
-        r"mean.*(?:salary|income|payment)": "statistical hypothesis test population mean",
-        r"(?:comparing|comparing|compare).*mean": "two-sample statistical test",
-        r"(?:comparing|comparing).*two.*(?:groups|samples)": "two-sample hypothesis test",
+        # Statistics & Probability (specific patterns first)
+        r"\bt.test\b": "two-sample t-test",
+        r"\bz.test\b": "two-sample z-test",
+        r"expected\s+(?:value|amount)": "expected value probability",
+        r"type\s+i\s+error": "type I error probability independent tests",
         r"survey.*(?:non-response|nonresponse|didn't respond|did not respond)": "survey methodology non-response bias",
-        r"type\s+i\s+error.*(?:multiple|independent)": "type I error probability independent tests",
-        r"normally\s+distributed.*middle\s+(\d+)": "normal distribution quartile percentile",
+        r"(?:comparing|compare).*mean": "two-sample statistical test",
+        r"mean.*(?:salary|income|payment)": "statistical hypothesis test population mean",
+        r"(?:normal|distribution).*middle\s+(\d+)": "normal distribution quartile percentile",
+        
+        # Geometry
         r"equilateral\s+triangle": "equilateral triangle geometry area",
         r"(?:matrix|matrices).*dimension": "linear algebra matrix multiplication dimension",
+        
+        # Probability
         r"(?:independent|mutually exclusive).*(?:event|probability)": "probability independent events",
+        r"(?:bin|urn|ball|draw|draws).*(?:random|probability)": "probability conditional expectation",
     }
     
     for pattern, concept in concept_map.items():

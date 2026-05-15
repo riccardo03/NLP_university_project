@@ -193,6 +193,8 @@ def search_formula(query: str) -> dict | None:
     """
     Search formula cache by query keywords.
     Returns matching formula dict or None.
+    
+    Only returns HIGH-CONFIDENCE matches to avoid false positives.
     """
     query_lower = query.lower()
     
@@ -200,7 +202,7 @@ def search_formula(query: str) -> dict | None:
     if query_lower in _FORMULA_CACHE:
         return _FORMULA_CACHE[query_lower]
     
-    # Keyword matching
+    # Keyword matching with HIGHER confidence threshold
     best_match = None
     best_score = 0
     
@@ -208,11 +210,12 @@ def search_formula(query: str) -> dict | None:
         score = 0
         keywords = data.get("keywords", [])
         
-        # Match against formula name
-        if all(word in name for word in query_lower.split()):
-            score += 10
+        # Match against formula name (strong signal)
+        name_words = name.lower().split()
+        matching_words = sum(1 for word in query_lower.split() if word in name_words)
+        score += matching_words * 5  # Weighted: name matches are strong
         
-        # Match against keywords
+        # Match against keywords (medium signal)
         for kw in keywords:
             if kw in query_lower:
                 score += 1
@@ -221,7 +224,10 @@ def search_formula(query: str) -> dict | None:
             best_score = score
             best_match = data
     
-    return best_match if best_score >= 1 else None
+    # Only return if GOOD confidence (score >= 3, not >= 1)
+    # This prevents random matches like "euler number" for "green balls"
+    # but still allows legitimate formula lookups
+    return best_match if best_score >= 3 else None
 
 
 def get_formula_by_category(category: str) -> list[dict]:
