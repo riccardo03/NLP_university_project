@@ -409,8 +409,14 @@ def _get_strategy(question: str, options: list, generate_answer_fn) -> tuple[str
 def rag_maths(question_text: str, option_texts: list = None,
               generate_answer_fn=None) -> str:
     """
-    Mathematics RAG: LLM strategy → Wikipedia formula → minimal DDG fallback.
-    Returns a concise formula/definition context, or '' for pure arithmetic.
+    Mathematics RAG: Computation + Formula Cache + Model Intelligence.
+    
+    Strategy:
+    1. Try inline computation (100% accurate for numeric problems)
+    2. Try formula cache (curated, high-confidence formulas)
+    3. Return empty context (let model use its knowledge)
+    
+    Web lookup (Wikipedia/DDG) disabled for math - adds noise without value.
     """
     if option_texts is None:
         option_texts = []
@@ -418,69 +424,38 @@ def rag_maths(question_text: str, option_texts: list = None,
     clean_q = _ARTICLE_REF_RE.sub("", question_text).strip(" ,;")
 
     # ------------------------------------------------------------------ #
-    # Stage 1: single LLM strategy call                                   #
+    # Stage 1: Inline Computation                                         #
     # ------------------------------------------------------------------ #
-    if generate_answer_fn is not None:
-        action, search_query, category = _get_strategy(clean_q, option_texts, generate_answer_fn)
-    else:
-        action, search_query, category = "QUERY", clean_q[:60], "General"
-
-    # Always try inline computation — a computed result is a strong hint
     computed = _compute_inline(clean_q)
-
-    if action == "SKIP":
-        print("  [RAG-Maths] SKIP — pure arithmetic, no lookup needed.")
-        return computed  # return numeric result if available, else ""
-
-    if not search_query or len(search_query) < 3:
-        search_query = _extract_concept(clean_q, category)
-
-    print(f"  [RAG-Maths] Searching [{category}]: {search_query!r}")
+    if computed:
+        print(f"  [RAG-Maths] Inline computation result: {computed[:80]}")
+        return computed
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Formula cache (fast-track)                                #
+    # Stage 2: Formula Cache Lookup                                       #
     # ------------------------------------------------------------------ #
-    cache_result = search_formula(search_query)
+    search_query = clean_q[:80]
+    if generate_answer_fn is not None:
+        try:
+            action, search_query, category = _get_strategy(clean_q, option_texts, generate_answer_fn)
+            if action == "SKIP":
+                print("  [RAG-Maths] SKIP — pure arithmetic, no context needed.")
+                return ""
+        except Exception as e:
+            print(f"  [RAG-Maths] Strategy call failed: {e}")
+    
+    # Extract concept-based search query
+    concept_query = _extract_concept(clean_q, "General")
+    print(f"  [RAG-Maths] Formula cache search: {concept_query!r}")
+    
+    cache_result = search_formula(concept_query)
     if cache_result:
         cache_text = format_formula_context(cache_result)
         print(f"  [RAG-Maths] Cache hit: {cache_result.get('formula', '')[:50]}...")
-        return (computed + "\n\n" + cache_text).strip()[:1400] if computed else cache_text
+        return cache_text
 
     # ------------------------------------------------------------------ #
-    # Stage 3: Wikipedia primary                                          #
+    # Stage 3: Model Intelligence (No Web Lookup)                         #
     # ------------------------------------------------------------------ #
-    wiki_text = _wiki_math(search_query)
-
-    if _wiki_is_useful(wiki_text) and _is_math_relevant(wiki_text, clean_q):
-        print(f"  [RAG-Maths] Wikipedia hit ({len(wiki_text)} chars).")
-        return (computed + "\n\n" + wiki_text).strip()[:1400]
-
-    # ------------------------------------------------------------------ #
-    # Stage 4: minimal DuckDuckGo fallback (1 result, 2s timeout)        #
-    # ------------------------------------------------------------------ #
-    print(f"  [RAG-Maths] Wikipedia insufficient, trying DDG (1 result).")
-    ddg_snippet = ""
-    try:
-        from ddgs import DDGS
-        with DDGS() as ddgs:
-            for r in ddgs.text(search_query, max_results=1, timeout=2):
-                body = r.get("body", "")
-                title = r.get("title", "")
-                if body and len(body.strip()) >= 60:
-                    ddg_snippet = f"[{title}] {body}" if title else body
-                    break
-    except Exception as exc:
-        print(f"  [RAG-Maths] DDG failed: {exc}")
-
-    # ------------------------------------------------------------------ #
-    # Stage 5: fail-safe — wiki over empty                               #
-    # ------------------------------------------------------------------ #
-    if ddg_snippet and _is_math_relevant(ddg_snippet, clean_q):
-        result = ddg_snippet[:1200]
-    elif _wiki_is_useful(wiki_text):
-        print(f"  [RAG-Maths] Fail-safe: returning Wikipedia text.")
-        result = wiki_text
-    else:
-        result = ddg_snippet[:1200] if ddg_snippet else ""
-
-    return (computed + "\n\n" + result).strip()[:1400] if result else computed
+    print(f"  [RAG-Maths] No computation/cache match. Using model knowledge.")
+    return ""
