@@ -41,7 +41,7 @@ _MAX_TOKENS = {
 # Section 2 · Model loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_model(model_name: str = "Qwen/Qwen3.5-4B-Instruct") -> None:
+def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
     print(f"Loading model: {model_name}")
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -100,7 +100,7 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-      "You are an expert Entertainment Trivia bot. Your goal is to select the correct option (0, 1, 2, or 3) with absolute precision."
+      "You are an expert Entertainment bot. Your goal is to select the correct option (0, 1, 2, or 3) with absolute precision."
 
       "HIERARCHY OF TRUTH:"
         "1. PROVIDED CONTEXT: If the context contains the answer, you MUST use it, even if it contradicts your internal knowledge."
