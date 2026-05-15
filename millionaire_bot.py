@@ -113,16 +113,15 @@ SYSTEM_PROMPTS = {
         "- Think step-by-step internally to eliminate wrong options, but your output must be concise."
 
       "OUTPUT FORMAT:"
-      "Provide a brief reasoning (max 2 sentences) explaining WHY the chosen option is correct based on the context or your knowledge."
-      "The VERY LAST LINE of your response must be exactly:"
-      "ANSWER: <digit>"
+      "The VERY FIRST LINE of your response must be exactly: ANSWER: <digit>. "
+      "Then provide a brief reasoning (1 sentence max) explaining WHY that option is correct."
     ),
 
     COMP_HISTORY_POLITICS: (
         "You are a history and politics expert. "
         "Given context (if any), a question, and four numbered options, "
-        "output ONLY the single digit (0, 1, 2, or 3) of the correct answer. "
-        "No explanation, no punctuation — just the digit."
+        "the VERY FIRST LINE of your response must be exactly: ANSWER: <digit> (where digit is 0, 1, 2, or 3). "
+        "Then provide a 1-sentence explanation of why that answer is correct."
     ),
 
     COMP_SCIENCE_NATURE: (
@@ -141,9 +140,8 @@ SYSTEM_PROMPTS = {
         "- DATA MATCHING: If the question asks for a value (e.g., a boiling point or distance), "
         "match the number exactly as it appears in the context. "
         "OUTPUT FORMAT: "
-        "Provide a 1-sentence logical deduction. "
-        "The VERY LAST LINE of your response must be exactly: "
-        "ANSWER: <digit>"
+        "The VERY FIRST LINE of your response must be exactly: ANSWER: <digit>. "
+        "Then provide a 1-sentence logical deduction explaining why."
     ),
 
     COMP_MATHS: (
@@ -163,9 +161,8 @@ SYSTEM_PROMPTS = {
         "- For Probability: Ensure the total sample space is correctly identified. "
         "- For Logic: Test the contrapositive if the direct statement is confusing. "
         "OUTPUT FORMAT: "
-        "Provide a very brief 1-sentence derivation of the result. "
-        "The VERY LAST LINE of your response must be exactly: "
-        "ANSWER: <digit>"
+        "The VERY FIRST LINE of your response must be exactly: ANSWER: <digit>. "
+        "Then provide a very brief 1-sentence derivation of the result."
     ),
 }
 
@@ -204,7 +201,7 @@ def extract_answer_id(text: str, num_options: int = 4) -> int:
     # Priority 0: explicit structured tag "ANSWER: X"
     tag_match = re.search(r"\bANSWER\s*:\s*([0-3])\b", text, re.I)
     if tag_match:
-        idx = int(tag_match.group(-1))
+        idx = int(tag_match.group(1))
         if idx < num_options:
             return idx
 
@@ -241,9 +238,10 @@ def build_user_prompt(question_text: str, options: list, context: str) -> str:
         f"{ctx_block}"
         f"Question: {question_text}\n\n"
         f"Options:\n{options_str}\n\n"
-        f"Reason BRIEFLY (1 sentence max), then output ONLY:\n"
+        f"Output FIRST on its own line:\n"
         f"ANSWER: X\n"
-        f"(where X is 0, 1, 2, or 3)"
+        f"(where X is 0, 1, 2, or 3)\n"
+        f"Then explain briefly in 1 sentence."
     )
 
 
