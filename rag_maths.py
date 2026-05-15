@@ -420,7 +420,7 @@ def rag_maths(question_text: str, option_texts: list = None,
     
     Strategy:
     1. Try inline computation (100% accurate for numeric problems)
-    2. Try formula cache (curated, high-confidence formulas)
+    2. Try formula cache with concept extraction (high-confidence only)
     3. Return empty context (let model use its knowledge)
     
     Web lookup (Wikipedia/DDG) disabled for math - adds noise without value.
@@ -439,19 +439,9 @@ def rag_maths(question_text: str, option_texts: list = None,
         return computed
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Formula Cache Lookup                                       #
+    # Stage 2: Formula Cache Lookup (Concept-Based)                       #
     # ------------------------------------------------------------------ #
-    search_query = clean_q[:80]
-    if generate_answer_fn is not None:
-        try:
-            action, search_query, category = _get_strategy(clean_q, option_texts, generate_answer_fn)
-            if action == "SKIP":
-                print("  [RAG-Maths] SKIP — pure arithmetic, no context needed.")
-                return ""
-        except Exception as e:
-            print(f"  [RAG-Maths] Strategy call failed: {e}")
-    
-    # Extract concept-based search query
+    # Extract concept FIRST - this is critical to avoid false matches
     concept_query = _extract_concept(clean_q, "General")
     print(f"  [RAG-Maths] Formula cache search: {concept_query!r}")
     
