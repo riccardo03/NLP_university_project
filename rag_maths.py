@@ -7,6 +7,7 @@ Optimised for latency: target < 10s total, leaving time for computation.
 import re
 import math
 from typing import Optional
+from math_formulas import search_formula, format_formula_context
 
 _ARTICLE_REF_RE = re.compile(
     r"\b(according to (the )?(article|text|passage|paragraph|excerpt))\b",
@@ -58,6 +59,61 @@ _MATH_STOP_WORDS = {
     "from", "with", "about", "into", "their", "there", "been", "were",
     "would", "could", "should", "following", "give", "find", "calculate",
     "compute", "evaluate", "solve", "determine", "express",
+}
+
+# Greek letters and their names for keyword extraction
+_GREEK_LETTERS = {
+    "π": "pi", "Π": "pi",
+    "α": "alpha", "Α": "alpha",
+    "β": "beta", "Β": "beta",
+    "γ": "gamma", "Γ": "gamma",
+    "δ": "delta", "Δ": "delta",
+    "ε": "epsilon", "Ε": "epsilon",
+    "ζ": "zeta", "Ζ": "zeta",
+    "η": "eta", "Η": "eta",
+    "θ": "theta", "Θ": "theta",
+    "λ": "lambda", "Λ": "lambda",
+    "μ": "mu", "Μ": "mu",
+    "σ": "sigma", "Σ": "sigma",
+    "τ": "tau", "Τ": "tau",
+    "φ": "phi", "Φ": "phi",
+    "ψ": "psi", "Ψ": "psi",
+    "ω": "omega", "Ω": "omega",
+    "∞": "infinity",
+}
+
+# Mathematical symbols and their semantic meaning
+_MATH_SYMBOLS = {
+    "√": "square root",
+    "∛": "cube root",
+    "∫": "integral",
+    "∑": "summation sum",
+    "∏": "product",
+    "∂": "partial derivative",
+    "∇": "nabla gradient",
+    "∝": "proportional",
+    "≈": "approximately",
+    "≠": "not equal",
+    "≤": "less than or equal",
+    "≥": "greater than or equal",
+    "∞": "infinity",
+    "∈": "element of",
+    "∉": "not element of",
+    "⊂": "subset",
+    "∪": "union",
+    "∩": "intersection",
+    "!": "factorial",
+    "^": "power exponent",
+}
+
+# Common math function and operator terms
+_MATH_FUNCTIONS = {
+    "sine", "sin", "cosine", "cos", "tangent", "tan",
+    "derivative", "integral", "limit", "sum", "product",
+    "logarithm", "log", "exponential", "exp",
+    "square", "cube", "root", "power",
+    "factorial", "permutation", "combination",
+    "determinant", "matrix", "eigenvector", "eigenvalue",
 }
 
 _USEFUL_SECTIONS_RE = re.compile(
@@ -124,6 +180,38 @@ def _compute_inline(question: str) -> str:
         val = _eval_expr(expr.replace(" ", ""))
         if val is not None:
             results.append(f"{expr.strip()} = {val}")
+    
+    # Equilateral triangle area: A = (√3/4) × s²
+    for side in re.findall(r"equilateral\s+triangle.*?(?:side|sides?|edge).*?(\d+\.?\d*)", q, re.I):
+        area = (math.sqrt(3) / 4) * float(side) ** 2
+        results.append(f"Equilateral triangle area (s={side}): {area:.2f}")
+    
+    # Type I error with multiple independent tests: P = 1 - (1-α)^k
+    type_i_match = re.search(r"(\d+)\s*(?:independent\s+)?tests.*?α\s*=\s*(0\.\d+|[\d.]+)", q, re.I)
+    if type_i_match:
+        k = int(type_i_match.group(1))
+        alpha = float(type_i_match.group(2))
+        prob_reject_once = 1 - (1 - alpha) ** k
+        results.append(f"P(Type I error in ≥1 of {k} tests, α={alpha}): {prob_reject_once:.2f}")
+    
+    # Normal distribution: middle X% → use z-score for (100-X)/2 percentile
+    middle_pct_match = re.search(r"middle\s+(\d+)\s*(?:%|percent)", q, re.I)
+    if middle_pct_match and re.search(r"normal|distribution|standard", q, re.I):
+        middle = int(middle_pct_match.group(1))
+        tail_pct = (100 - middle) / 2
+        # Standard z-scores: 25th percentile ≈ -0.674, 75th percentile ≈ +0.674
+        z_critical = 0.674 if middle == 50 else None
+        if z_critical:
+            # Match "mean of X,XXX" (handle commas)
+            mean_match = re.search(r"mean\s+of\s+([\d,]+\.?\d*)", q, re.I)
+            # Match "standard deviation of X" (handle commas)
+            sigma_match = re.search(r"(?:standard\s+deviation|σ)\s+of\s+([\d,]+\.?\d*)", q, re.I)
+            if mean_match and sigma_match:
+                mean = float(mean_match.group(1).replace(",", ""))
+                sigma = float(sigma_match.group(1).replace(",", ""))
+                lower = mean - z_critical * sigma
+                upper = mean + z_critical * sigma
+                results.append(f"Middle {middle}% range: ({lower:.0f}, {upper:.0f})")
 
     return "Computed: " + "; ".join(results) if results else ""
 
@@ -134,13 +222,39 @@ def _compute_inline(question: str) -> str:
 
 def _extract_math_keywords(text: str) -> list[str]:
     keywords = []
+    
+    # Extract Greek letters and replace with their names
+    for symbol, name in _GREEK_LETTERS.items():
+        if symbol in text:
+            keywords.append(name)
+    
+    # Extract mathematical symbols and their meanings
+    for symbol, meaning in _MATH_SYMBOLS.items():
+        if symbol in text:
+            # Add the meaning words (e.g., "integral" from "∫")
+            for word in meaning.split():
+                keywords.append(word)
+    
+    # Extract standard words (5+ chars, not stopwords)
     for w in re.findall(r'\b[a-z]{5,}\b', text.lower()):
         if w not in _MATH_STOP_WORDS:
             keywords.append(w)
+    
+    # Extract acronyms (uppercase sequences)
     for w in re.findall(r'\b[A-Z]{2,}\b', text):
         keywords.append(w.lower())
+    
+    # Extract decimal numbers
     for w in re.findall(r'\b\d+\.\d+\b', text):
         keywords.append(w)
+    
+    # Extract known math functions (case-insensitive)
+    text_lower = text.lower()
+    for func in _MATH_FUNCTIONS:
+        if func in text_lower:
+            keywords.append(func)
+    
+    # Remove duplicates while preserving order
     return list(dict.fromkeys(keywords))
 
 
@@ -236,6 +350,42 @@ def _parse_strategy(raw: str) -> tuple[str, str, str]:
     return "QUERY", query, category
 
 
+def _extract_concept(question: str, category: str) -> str:
+    """
+    Extract key concepts from question for better searching.
+    Replaces narrative details with conceptual keywords.
+    """
+    q_lower = question.lower()
+    
+    # Pattern-based concept extraction
+    concept_map = {
+        # Statistics
+        r"mean.*(?:salary|income|payment)": "statistical hypothesis test population mean",
+        r"(?:comparing|comparing|compare).*mean": "two-sample statistical test",
+        r"(?:comparing|comparing).*two.*(?:groups|samples)": "two-sample hypothesis test",
+        r"survey.*(?:non-response|nonresponse|didn't respond|did not respond)": "survey methodology non-response bias",
+        r"type\s+i\s+error.*(?:multiple|independent)": "type I error probability independent tests",
+        r"normally\s+distributed.*middle\s+(\d+)": "normal distribution quartile percentile",
+        r"equilateral\s+triangle": "equilateral triangle geometry area",
+        r"(?:matrix|matrices).*dimension": "linear algebra matrix multiplication dimension",
+        r"(?:independent|mutually exclusive).*(?:event|probability)": "probability independent events",
+    }
+    
+    for pattern, concept in concept_map.items():
+        if re.search(pattern, q_lower, re.I):
+            return concept
+    
+    # Fallback: extract key math terms
+    keywords = _extract_math_keywords(question)
+    if keywords:
+        # Filter to meaningful terms
+        meaningful = [kw for kw in keywords if len(kw) > 3 and kw not in _MATH_STOP_WORDS]
+        if meaningful:
+            return " ".join(meaningful[:4])  # Top 4 keywords
+    
+    return question[:60]  # Fallback to original
+
+
 def _get_strategy(question: str, options: list, generate_answer_fn) -> tuple[str, str, str]:
     opts_str = ", ".join(f'"{t}"' for t in options) if options else "—"
     user_msg = f"Q: {question}\nOptions: [{opts_str}]"
@@ -247,7 +397,9 @@ def _get_strategy(question: str, options: list, generate_answer_fn) -> tuple[str
         return action, query, category
     except Exception as e:
         print(f"  [RAG-Maths] Strategy call failed: {e}")
-        return "QUERY", question[:60], "General"
+        # Fallback to concept extraction
+        concept = _extract_concept(question, "General")
+        return "QUERY", concept, "General"
 
 
 # ------------------------------------------------------------------ #
@@ -281,12 +433,21 @@ def rag_maths(question_text: str, option_texts: list = None,
         return computed  # return numeric result if available, else ""
 
     if not search_query or len(search_query) < 3:
-        search_query = clean_q[:60]
+        search_query = _extract_concept(clean_q, category)
 
     print(f"  [RAG-Maths] Searching [{category}]: {search_query!r}")
 
     # ------------------------------------------------------------------ #
-    # Stage 2: Wikipedia primary                                          #
+    # Stage 2: Formula cache (fast-track)                                #
+    # ------------------------------------------------------------------ #
+    cache_result = search_formula(search_query)
+    if cache_result:
+        cache_text = format_formula_context(cache_result)
+        print(f"  [RAG-Maths] Cache hit: {cache_result.get('formula', '')[:50]}...")
+        return (computed + "\n\n" + cache_text).strip()[:1400] if computed else cache_text
+
+    # ------------------------------------------------------------------ #
+    # Stage 3: Wikipedia primary                                          #
     # ------------------------------------------------------------------ #
     wiki_text = _wiki_math(search_query)
 
@@ -295,7 +456,7 @@ def rag_maths(question_text: str, option_texts: list = None,
         return (computed + "\n\n" + wiki_text).strip()[:1400]
 
     # ------------------------------------------------------------------ #
-    # Stage 3: minimal DuckDuckGo fallback (1 result, 2s timeout)        #
+    # Stage 4: minimal DuckDuckGo fallback (1 result, 2s timeout)        #
     # ------------------------------------------------------------------ #
     print(f"  [RAG-Maths] Wikipedia insufficient, trying DDG (1 result).")
     ddg_snippet = ""
@@ -312,7 +473,7 @@ def rag_maths(question_text: str, option_texts: list = None,
         print(f"  [RAG-Maths] DDG failed: {exc}")
 
     # ------------------------------------------------------------------ #
-    # Stage 4: fail-safe — wiki over empty                               #
+    # Stage 5: fail-safe — wiki over empty                               #
     # ------------------------------------------------------------------ #
     if ddg_snippet and _is_math_relevant(ddg_snippet, clean_q):
         result = ddg_snippet[:1200]
