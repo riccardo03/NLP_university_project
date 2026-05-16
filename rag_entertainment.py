@@ -1,509 +1,264 @@
-"""RAG pipeline for the Entertainment competition."""
+"""
+Pipeline:
+  1. Estrae i soggetti dalla domanda (titoli citati, nomi propri).
+  2. Per ogni opzione costruisce una query: "<opzione> <soggetto>".
+  3. Cerca su Wikipedia (soggetto principale) + DuckDuckGo (per ogni opzione).
+  4. Assegna un punteggio a ogni opzione misurando co-occorrenza opzione/soggetto.
+  5. Restituisce un contesto strutturato all'LLM.
+  6. Se nessuna ricerca produce evidenze → stringa vuota → fallback sul LLM.
+"""
 
 import re
 import concurrent.futures
 import urllib.parse
 import requests
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# ── Costanti ──────────────────────────────────────────────────────────────────
 
-_ARTICLE_REF_RE = re.compile(
-    r'\b(according to|as described in|as stated in|in his own words|based on|per) '
-    r'(the article|the text|the passage|the excerpt)\b', re.I
-)
-_LOW_QUALITY_SIGNALS = [
-    r'\d{4}\s*[·•]\s', r'click here', r'subscribe', r'read more',
-    r'sign up', r'\.\.\.read', r'youtube\.com', r'goo\.gl',
-    r'fandom\.com', r'wikia\.com',
-]
-_TRUSTED_DOMAINS = {
-    "wikipedia.org", "britannica.com", "imdb.com", "allmusic.com",
-    "rottentomatoes.com", "biography.com", "rollingstone.com", "billboard.com",
-}
+_WIKI_UA = "QuizBot/1.0 (research)"
+_TIMEOUT = 4
+
 _STOP_WORDS = {
-    "what", "when", "which", "where", "does", "have", "this",
-    "that", "from", "with", "about", "into", "their", "there",
-    "been", "were", "would", "could", "should", "according",
+    "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
+    "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
+    "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
+    "has", "have", "had", "will", "would", "could", "should", "can", "may",
+    "this", "that", "these", "those", "their", "there", "according", "following",
+    "describes", "describe", "best", "most", "called", "named", "own",
+    "film", "movie", "song", "show", "album", "band", "role", "character",
+    "single", "track", "series", "actor", "actress", "director", "article",
 }
-_TITLE_STOP_LOWER = {
-    "which", "what", "how", "who", "when", "where", "why",
-    "the", "this", "that", "these", "those", "a", "an",
-    "is", "are", "was", "were", "has", "have", "had",
-    "does", "do", "did", "will", "would", "could", "should",
-    "according", "following", "best", "most", "first", "last",
-    "film", "song", "show", "role", "style", "music", "band",
-    "album", "movie", "book", "character", "actor", "director",
-    "describes", "describe", "known", "used", "made", "played",
-    "between", "during", "after", "before", "about", "into",
-}
-_SOURCE_WEIGHT = {"wiki": 0.7, "ddg": 1.3}   # DDG precision > Wikipedia verbosity
+
 _RELATION_VERBS = frozenset({
-    "starred", "starring", "stars", "directed", "directing", "directs",
-    "released", "releasing", "wrote", "written", "writes",
-    "produced", "producing", "appeared", "appearing",
-    "performed", "performing", "played", "playing",
-    "sang", "singing", "recorded", "recording",
-    "featuring", "featured", "voiced", "voicing",
-    "hosted", "hosting", "created", "creating", "won", "nominated",
+    "starred", "stars", "starring", "played", "plays", "playing",
+    "appeared", "appears", "performed", "performs", "voiced", "voices",
+    "portrayed", "portrays", "directed", "directs", "wrote", "writes",
+    "written", "produced", "produces", "created", "creates", "recorded",
+    "records", "released", "releases", "hosted", "hosts", "featured",
+    "features", "sang", "sings", "won", "wins", "nominated", "known",
+    "describes", "describe", "called", "named", "is", "was",
 })
 
-# ── regex patterns ─────────────────────────────────────────────────────────────
-
-_UL = r'A-ZÀ-ÖØ-Ý'
-_AL = r'a-zA-ZÀ-ÖØ-öø-ÿ'
-_PROPER_NOUN_RE   = re.compile(rf'([{_UL}][{_AL}]+(?:\s+[{_UL}][{_AL}]+)+)')
-_SPECIAL_NAME_RE  = re.compile(r'[A-Za-z]+[\$!@&\.][A-Za-z]+')
-_QUOTED_TITLE_RE  = re.compile(r"""(?<!\w)['"]([\w][\w\s,\.\-]{1,58}?)['"]""")
-_CAMEL_CASE_RE    = re.compile(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b')
-_QUESTION_WORDS   = re.compile(r'^(Which|What|How|Who|When|Where|Why)$')
-_YEAR_RE          = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
-_SINGLE_PROPER_RE = re.compile(rf'\b([{_UL}][{_AL}]{{2,}})\b')
-_HYPHEN_NAME_RE   = re.compile(r'\b([A-Z][a-zA-Z]+-[A-Z][a-zA-Z0-9]*)\b')
-_Q_WHO            = re.compile(r'^\s*who\b', re.I)
-_Q_WHAT_WORK      = re.compile(
-    r'^\s*what\s+(film|movie|show|series|song|album|track|record|role)\b', re.I
-)
-_SENT_SPLIT_RE    = re.compile(r'(?<=[.!?])\s+')
-_COMPARE_RE       = re.compile(
-    r'\b(differ|difference|compare|versus|\bvs\b|between|contrast|relation|relationship)\b', re.I
-)
-_CITE_RE          = re.compile(r'\[\d+\]')
-_WIKI_UA          = "PoliMillionaireBot/1.0 (university research project)"
-
-# ── entity type rules (used by Wikipedia candidate ranking) ────────────────────
-
-_CATEGORY_TYPE_RULES: dict[str, str] = {
-    "films":                "FILM",
-    "film":                 "FILM",
-    "albums":               "ALBUM",
-    "album":                "ALBUM",
-    "songs":                "SONG",
-    "song":                 "SONG",
-    "singles":              "SONG",
-    "television series":    "TV_SHOW",
-    "tv series":            "TV_SHOW",
-    "television shows":     "TV_SHOW",
-    "bands":                "BAND",
-    "musical groups":       "BAND",
-    "rock groups":          "BAND",
-    "actors":               "PERSON",
-    "actresses":            "PERSON",
-    "rappers":              "PERSON",
-    "musicians":            "PERSON",
-    "singers":              "PERSON",
-    "directors":            "PERSON",
-    "characters":           "CHARACTER",
-    "fictional characters": "CHARACTER",
-    "ships":                "SHIP",
-    "cities":               "PLACE",
-    "populated places":     "PLACE",
-}
-_QUESTION_TYPE_RULES: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'\b(film|movie|directed|starred|released|box office|cinema)\b', re.I), "FILM"),
-    (re.compile(r'\b(tv show|television|series|episode|season|aired)\b',          re.I), "TV_SHOW"),
-    (re.compile(r'\b(song|single|track|lyrics|chorus|wrote the song)\b',           re.I), "SONG"),
-    (re.compile(r'\b(album|discography|record|label|studio album)\b',              re.I), "ALBUM"),
-    (re.compile(r'\b(band|group|formed|lead singer|drummer|guitarist)\b',          re.I), "BAND"),
-    (re.compile(r'\b(actor|actress|born|nationality|career|role)\b',               re.I), "PERSON"),
-]
+_QUOTED_RE        = re.compile(r"""['"\u2018\u2019\u201C\u201D]([\w][\w\s,.\-&!]{1,58}?)['"\u2018\u2019\u201C\u201D]""")
+_PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
+_PROPER_SINGLE_RE = re.compile(r'^[A-ZÀ-Ý][a-zA-ZÀ-ÿ]{2,}$')
+_TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
+_CITE_RE          = re.compile(r"\[\d+\]")
 
 
-# ── snippet quality ───────────────────────────────────────────────────────────
+# ── Tokenizzazione & keyword ──────────────────────────────────────────────────
 
-def _is_quality_snippet(text: str, url: str = "") -> bool:
-    if not text:
-        return False
-    s, sl = text.strip(), text.strip().lower()
-    if len(s) < 80:
-        return False
-    for p in _LOW_QUALITY_SIGNALS:
-        if re.search(p, sl):
-            return False
-    if url:
-        m = re.search(r'https?://(?:www\.)?([^/]+)', url)
-        if m and any(t in m.group(1) for t in _TRUSTED_DOMAINS):
-            return True
-    return len(s) >= 80 and len(sl.split()) >= 12
+def _tokenize(text: str) -> list[str]:
+    return _TOKEN_RE.findall(text.lower())
 
 
-# ── keyword extraction ────────────────────────────────────────────────────────
+def _keywords(text: str) -> set[str]:
+    return {t for t in _tokenize(text) if len(t) >= 3 and t not in _STOP_WORDS}
 
-def _extract_keywords(text: str) -> list[str]:
-    """Tiered extraction: named entities first, generic topic words last."""
+
+# ── Estrazione soggetti ───────────────────────────────────────────────────────
+
+def _extract_subjects(question: str) -> list[str]:
+    subjects: list[str] = []
     seen: set[str] = set()
-    kws: list[str] = []
 
-    def _add(w: str) -> None:
-        if w and w not in seen:
-            seen.add(w); kws.append(w)
+    def _add(raw: str) -> None:
+        s = raw.strip()
+        sl = s.lower()
+        if s and sl not in seen and sl not in _STOP_WORDS:
+            seen.add(sl)
+            subjects.append(s)
 
-    for entity in _PROPER_NOUN_RE.findall(text):        # Tier 1: proper noun components
-        for word in entity.split():
-            wl = word.lower()
-            if len(wl) >= 3 and wl not in _STOP_WORDS:
-                _add(wl)
-    for w in _SPECIAL_NAME_RE.findall(text):            # Tier 2: A$AP, P!nk, etc.
-        _add(w.lower())
-    for w in re.findall(r'\b[A-Z]{2,}\b', text):        # Tier 3: MCU, HBO, etc.
-        _add(w.lower())
-    for w in re.findall(r'\b(1[0-9]{3}|2[0-9]{3})\b', text):  # Tier 4: years
-        _add(w)
-    for w in re.findall(r'\b[a-z]{4,}\b', text.lower()):       # Tier 5: generic words
-        if w not in _STOP_WORDS:
-            _add(w)
-    return kws
+    # 1. Titoli tra virgolette
+    for q in _QUOTED_RE.findall(question):
+        _add(q)
 
+    # 2. Nomi propri multi-parola 
+    for m in _PROPER_MULTI_RE.findall(question):
+        _add(m)
 
-def _is_relevant(snippet: str, question: str, threshold: int = 2) -> bool:
-    kws = _extract_keywords(question)
-    if not kws:
-        return True
-    snl = snippet.lower()
-    return sum(1 for kw in kws if kw in snl) >= threshold
+    # 3. Nomi propri singoli
+    words = question.split()
+    for i, w in enumerate(words):
+        if i == 0:
+            continue
+        clean = re.sub(r"[^\w]+$", "", w)
+        if _PROPER_SINGLE_RE.match(clean) and clean.lower() not in seen:
+            if not any(clean in s.split() for s in subjects):
+                _add(clean)
+
+    return subjects
 
 
-# ── query building ────────────────────────────────────────────────────────────
+# ── Ricerca: Wikipedia ────────────────────────────────────────────────────────
 
-def _build_query(question: str) -> tuple[str, int | str]:
-    ysuf = f" {m.group(1)}" if (m := _YEAR_RE.search(question)) else ""
-
-    # Collect all quoted titles, deduplicated, preserving order
-    quoted = list(dict.fromkeys(t.strip() for t in _QUOTED_TITLE_RE.findall(question) if t.strip()))
-
-    if len(quoted) >= 2:
-        # Multiple quoted titles: combine first two.
-        # Use _COMPARE_RE to label the debug message accurately.
-        t1, t2 = quoted[0], quoted[1]
-        label = "Comparison" if _COMPARE_RE.search(question) else "Multi-title"
-        print(f"  [RAG-Ent] {label}: {t1!r} + {t2!r}")
-        return f"{t1} {t2}{ysuf}", "1a-multi"
-
-    if quoted:
-        title = quoted[0]
-        tl    = title.lower()
-        # Exclude proper nouns that are the title itself or a substring of it —
-        # _PROPER_NOUN_RE would otherwise re-match words inside the quoted text.
-        proper = [
-            e for e in _PROPER_NOUN_RE.findall(question)
-            if e.lower() != tl and e.lower() not in tl
-        ]
-        if proper:
-            entity = proper[0].strip()
-            print(f"  [RAG-Ent] Relation: {entity!r} + {title!r}")
-            return f"{entity} {title}{ysuf}", "1a"
-        print(f"  [RAG-Ent] Title: {title!r}")
-        return f"{title}{ysuf}", 1
-
-    proper = _PROPER_NOUN_RE.findall(question)
-    if proper:
-        entity = proper[0].strip()
-        print(f"  [RAG-Ent] Proper: {entity!r}")
-        return f"{entity}{ysuf}", 2
-
-    hyphen = _HYPHEN_NAME_RE.findall(question)
-    if hyphen:
-        entity = hyphen[0]
-        print(f"  [RAG-Ent] Hyphenated: {entity!r}")
-        return f"{entity}{ysuf}", "2d"
-
-    words       = question.split()
-    possessives = re.findall(rf"\b([{_UL}][{_AL}]{{2,}})'s\b", question)
-    singles     = [m for m in _SINGLE_PROPER_RE.findall(question)
-                   if m.lower() not in _TITLE_STOP_LOWER and m != words[0]]
-    ordered = list(dict.fromkeys(possessives + singles))
-    if ordered:
-        print(f"  [RAG-Ent] Single: {ordered[0]!r}")
-        return f"{ordered[0]}{ysuf}", "2c"
-
-    camel = [m for m in _CAMEL_CASE_RE.findall(question) if not _QUESTION_WORDS.match(m)]
-    if camel:
-        print(f"  [RAG-Ent] CamelCase: {camel[0]!r}")
-        return f"{camel[0]}{ysuf}", "2b"
-
-    kws = [kw for kw in _extract_keywords(question)
-           if len(kw) >= 5 and kw not in _TITLE_STOP_LOWER]
-    if len(kws) >= 2:
-        q = " ".join(kws[:5])
-        print(f"  [RAG-Ent] Keywords: {q!r}")
-        return f"{q}{ysuf}", 3
-
-    print("  [RAG-Ent] Raw fallback")
-    return question[:80], 3
-
-
-def _build_wiki_query(query: str, question: str = "") -> str:
-    """Pick the most useful Wikipedia entity when multiple proper nouns exist."""
-    entities = _PROPER_NOUN_RE.findall(query)
-    if not entities:
-        return query
-    if len(entities) == 1:
-        return entities[0].strip()
-
-    _ARTS = {"the", "a", "an", "of"}
-    persons = [e for e in entities
-               if len(e.split()) == 2 and not any(w.lower() in _ARTS for w in e.split())]
-    works   = [e for e in entities if e.split()[0].lower() in _ARTS]
-    others  = [e for e in entities if e not in persons and e not in works]
-
-    if _Q_WHO.match(question):
-        ranked = works or persons or others
-    elif _Q_WHAT_WORK.match(question):
-        ranked = persons or works or others
-    else:
-        ranked = works or persons or others
-    return (ranked[0] if ranked else max(entities, key=len)).strip()
-
-
-def _build_ddg_query(entity: str, question: str) -> str:
-    ew    = set(entity.lower().split())
-    extra = [kw for kw in _extract_keywords(question) if kw not in ew]
-    return f"{entity} {' '.join(extra[:3])}".strip()[:80]
-
-
-# ── Wikipedia ─────────────────────────────────────────────────────────────────
-
-def _wiki_search(query: str) -> list[str]:
-    """OpenSearch: returns up to 5 candidate page titles."""
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        f"?action=opensearch&search={urllib.parse.quote(query)}&limit=5&format=json"
-    )
+def _wiki_lookup(query: str) -> str:
+    """OpenSearch → primo titolo non-ambiguo → estratto pulito."""
     try:
-        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=3)
-        if r.status_code == 200:
-            return r.json()[1]
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=opensearch&search={urllib.parse.quote(query)}&limit=3&format=json"
+        )
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=_TIMEOUT)
+        if r.status_code != 200:
+            return ""
+        candidates = r.json()[1]
+        if not candidates:
+            return ""
+        title = next(
+            (c for c in candidates if "disambiguation" not in c.lower()),
+            candidates[0],
+        )
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&prop=extracts&exintro=false&explaintext=true"
+            f"&titles={urllib.parse.quote(title)}&format=json"
+        )
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=_TIMEOUT)
+        if r.status_code != 200:
+            return ""
+        pages = r.json()["query"]["pages"]
+        text = pages[next(iter(pages))].get("extract", "")
+        text = _CITE_RE.sub("", text)
+        return text[:3500] if "may refer to:" not in text.lower() else ""
     except Exception:
-        pass
-    return []
+        return ""
 
 
-def _wiki_categories(title: str) -> list[str]:
-    """Fetch lowercase Wikipedia category names (without 'Category:' prefix)."""
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        f"?action=query&prop=categories&cllimit=20"
-        f"&titles={urllib.parse.quote(title)}&format=json"
-    )
-    try:
-        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=3)
-        if r.status_code == 200:
-            pages = r.json()["query"]["pages"]
-            cats  = pages[next(iter(pages))].get("categories", [])
-            return [c["title"].removeprefix("Category:").lower() for c in cats]
-    except Exception:
-        pass
-    return []
+# ── Ricerca: DuckDuckGo ───────────────────────────────────────────────────────
 
-
-def _infer_wiki_types(categories: list[str]) -> set[str]:
-    types: set[str] = set()
-    for cat in categories:
-        for keyword, entity_type in _CATEGORY_TYPE_RULES.items():
-            if keyword in cat:
-                types.add(entity_type)
-    return types
-
-
-def _infer_expected_type(question: str) -> str | None:
-    for pattern, entity_type in _QUESTION_TYPE_RULES:
-        if pattern.search(question):
-            return entity_type
-    return None
-
-
-def _pick_wiki_title(candidates: list[str], question: str) -> str:
-    """
-    Pick the most relevant page from OpenSearch candidates.
-    Score = verbatim match length + category type match (+5).
-    Longer titles checked first so 'Titanic (1997 film)' can beat plain 'Titanic'.
-    """
-    valid = [c for c in candidates
-             if "(disambiguation)" not in c.lower() and "(name)" not in c.lower()]
-    if not valid:
-        valid = candidates
-
-    expected_type = _infer_expected_type(question)
-    q_lower       = question.lower()
-
-    def _score(title: str) -> float:
-        pat      = r'(?<![a-zA-Z0-9])' + re.escape(title.lower()) + r'(?![a-zA-Z0-9])'
-        verbatim = len(title) if re.search(pat, q_lower) else 0
-        cats     = _wiki_categories(title) if (verbatim or expected_type) else []
-        types    = _infer_wiki_types(cats)
-        return verbatim + (5.0 if expected_type and expected_type in types else 0.0)
-
-    return max(valid, key=_score)
-
-
-def _wiki(query: str, question: str = "") -> str:
-    candidates = _wiki_search(query)
-    title = _pick_wiki_title(candidates, question or query) if candidates else query
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        f"?action=query&prop=extracts&exintro=false&explaintext=true"
-        f"&titles={urllib.parse.quote(title)}&format=json"
-    )
-    try:
-        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
-        if r.status_code == 200:
-            pages = r.json()["query"]["pages"]
-            text = _CITE_RE.sub("", pages[next(iter(pages))].get("extract", ""))
-            return text[:5000] if text else ""
-    except Exception:
-        pass
-    return ""
-
-
-def _wiki_is_useful(text: str) -> bool:
-    return bool(text) and len(text.strip()) >= 100 and "may refer to:" not in text.lower()
-
-
-# ── fetch ─────────────────────────────────────────────────────────────────────
-
-def _fetch_ddg(ddg_query: str, num_results: int) -> list[str]:
-    results = []
+def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
+    """Lista di snippet (titolo + body) per la query data."""
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
-            for r in ddgs.text(ddg_query, max_results=num_results, timeout=3):
-                body, url = r.get("body", ""), r.get("href", "")
-                if _is_quality_snippet(body, url):
-                    title = r.get("title", "")
-                    results.append(f"[{title}]{body}" if title else body)
-    except Exception as exc:
-        print(f"  [RAG-Ent] DDG error: {exc}")
-    return results
+            out = []
+            for r in ddgs.text(query, max_results=max_results, timeout=_TIMEOUT):
+                body  = r.get("body", "")
+                title = r.get("title", "")
+                if body and len(body) >= 60:
+                    out.append(f"{title}. {body}" if title else body)
+            return out
+    except Exception as e:
+        print(f"  [RAG] DDG error: {e}")
+        return []
 
 
-# ── scoring ───────────────────────────────────────────────────────────────────
+# ── Scoring ───────────────────────────────────────────────────────────────────
 
-def _split_sentences(text: str) -> list[str]:
-    return [s.strip() for s in _SENT_SPLIT_RE.split(text) if len(s.strip()) > 20]
-
-
-def _score_sentence(words: list[str], cand_kws: list[str], entity_kws: list[str]) -> float:
-    """Returns 0 if assertion gate fails (either token absent in sentence)."""
-    cand_pos   = [i for i, w in enumerate(words) if any(kw in w for kw in cand_kws)]
-    entity_pos = [i for i, w in enumerate(words)
-                  if any(kw in w for kw in entity_kws)] if entity_kws else []
-    if not cand_pos or (entity_kws and not entity_pos):
+def _score_option(option: str, subjects: list[str], snippets: list[str]) -> float:
+    """Score basato su:
+       - co-occorrenza token dell'opzione + token del soggetto (gate)
+       - copertura % dei token dell'opzione presenti
+       - bonus per verbi di relazione nello stesso snippet
+    """
+    opt_kws = _keywords(option)
+    if not opt_kws:
         return 0.0
-    if entity_pos:
-        lo, hi = min(min(cand_pos), min(entity_pos)), max(max(cand_pos), max(entity_pos))
-        vb     = min(sum(1 for w in words[lo:hi+1] if w in _RELATION_VERBS) * 0.75, 1.5)
-        prox   = max(0.0, (10 - min(abs(c-e) for c in cand_pos for e in entity_pos)) / 10.0)
-    else:
-        vb, prox = min(sum(1 for w in words if w in _RELATION_VERBS) * 0.75, 1.5), 0.0
-    return 1.0 + vb + prox + (0.3 if cand_pos[0] <= 3 else 0.0)
+
+    subj_kws: set[str] = set()
+    for s in subjects:
+        subj_kws |= _keywords(s)
+
+    total = 0.0
+    for snip in snippets:
+        if not snip:
+            continue
+        words = _tokenize(snip)
+        wset  = set(words)
+
+        opt_hits = opt_kws & wset
+        if not opt_hits:
+            continue
+        if subj_kws and not (subj_kws & wset):
+            continue
+
+        coverage  = len(opt_hits) / len(opt_kws)       
+        verb_bonus = min(sum(1 for w in words if w in _RELATION_VERBS) * 0.25, 1.0)
+        total += coverage + verb_bonus
+
+    return total
 
 
-def _relation_score(snippet: str, candidate: str, entity: str) -> float:
-    """Normalized score: mean_quality × (1 + density). Dense DDG facts beat sparse Wiki dumps."""
-    cand_kws, entity_kws = _extract_keywords(candidate), _extract_keywords(entity)
-    if not cand_kws:
-        return 0.0
-    sentences = _split_sentences(snippet)
-    if not sentences:
-        return 0.0
-    scores    = [_score_sentence(s.lower().split(), cand_kws, entity_kws) for s in sentences]
-    asserting = [s for s in scores if s > 0.0]
-    if not asserting:
-        return 0.0
-    return (sum(asserting) / len(asserting)) * (1.0 + len(asserting) / len(sentences))
-
-
-# ── main entry point ──────────────────────────────────────────────────────────
+# ── Pipeline principale ───────────────────────────────────────────────────────
 
 def rag_entertainment(query: str, num_results: int = 3,
                       generate_answer_fn=None, option_texts: list = None) -> str:
-    """Candidate-centric RAG: evidence bucketed and scored per option independently."""
-    if _ARTICLE_REF_RE.search(query):
-        print("  [RAG-Ent] Article-reference — skipping.")
-        return ""
 
-    base_query, priority = _build_query(query)
-    wiki_query = _build_wiki_query(base_query, question=query)
-    ddg_query  = _build_ddg_query(wiki_query, query) if priority in (2, "2c", "2b") else base_query
-    print(f"  [RAG-Ent] P{priority} wiki={wiki_query!r} ddg={ddg_query!r}")
+    subjects = _extract_subjects(query)
+    print(f"  [RAG] Subjects: {subjects or '(none)'}")
 
-    n_opts       = min(len(option_texts), 4) if option_texts else 0
-    cand_queries = [f"{option_texts[i].strip()[:35]} {wiki_query}"[:80] for i in range(n_opts)]
+    if subjects:
+        main_term = subjects[0]
+    else:
+        kws = [w for w in _tokenize(query) if len(w) >= 4 and w not in _STOP_WORDS]
+        main_term = " ".join(kws[:4]) if kws else query[:60]
 
-    pool      = concurrent.futures.ThreadPoolExecutor(max_workers=2 + n_opts)
-    wiki_fut  = pool.submit(_wiki, wiki_query, query)
-    ddg_fut   = pool.submit(_fetch_ddg, ddg_query, num_results)
-    cand_futs = [pool.submit(_fetch_ddg, cq, 1) for cq in cand_queries]
+    subj_str = " ".join(subjects[:2]) if subjects else main_term
 
-    try:    wiki_result = wiki_fut.result(timeout=4)
-    except Exception: wiki_result = ""; print("  [RAG-Ent] Wikipedia timed out.")
-    try:    ddg_results = ddg_fut.result(timeout=4)
-    except Exception: ddg_results = []; print("  [RAG-Ent] DDG timed out.")
+    if not option_texts:
+        wiki = _wiki_lookup(main_term)
+        ddg  = _ddg_lookup(subj_str, num_results)
+        return "\n\n".join(([wiki] if wiki else []) + ddg)[:1500]
 
-    cand_raw: list[list[str]] = []
-    for i, fut in enumerate(cand_futs):
+    n_opts = min(len(option_texts), 4)
+
+    cand_queries = [
+        f"{option_texts[i].strip()[:40]} {subj_str}".strip()[:80]
+        for i in range(n_opts)
+    ]
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 2)
+    wiki_fut    = pool.submit(_wiki_lookup, main_term)
+    general_fut = pool.submit(_ddg_lookup, f"{subj_str} {query[:60]}".strip()[:80],
+                              num_results)
+    opt_futs    = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
+
+    def _safe(fut, default):
         try:
-            hits = fut.result(timeout=3)
-            cand_raw.append(hits)
-            if hits: print(f"  [RAG-Ent] Cand[{i}] hit: {cand_queries[i]!r}")
+            return fut.result(timeout=_TIMEOUT + 1)
         except Exception:
-            cand_raw.append([])
+            return default
+
+    wiki_text    = _safe(wiki_fut, "")
+    general_snip = _safe(general_fut, [])
+    opt_snips    = [_safe(f, []) for f in opt_futs]
     pool.shutdown(wait=False)
 
-    # Build global snippet pool — tagged by source for downstream weighting
-    seen_g: set[str] = set()
-    global_snippets: list[tuple[str, str]] = []   # (source, text)
+    shared: list[str] = []
+    seen_key: set[str] = set()
+    if wiki_text:
+        shared.append(wiki_text)
+        seen_key.add(wiki_text[:120])
+    for s in general_snip:
+        k = s[:120]
+        if k not in seen_key:
+            shared.append(s)
+            seen_key.add(k)
 
-    if _wiki_is_useful(wiki_result):
-        seen_g.add(wiki_result)
-        global_snippets.append(("wiki", wiki_result))
-        print(f"  [RAG-Ent] Wikipedia hit ({len(wiki_result)} chars).")
-    for text in ddg_results:
-        if text and text not in seen_g:
-            seen_g.add(text); global_snippets.append(("ddg", text))
+    # Scoring per ogni opzione 
+    scores: dict[int, float] = {}
+    for i in range(n_opts):
+        scores[i] = _score_option(option_texts[i], subjects,
+                                  opt_snips[i] + shared)
 
-    # Flat fallback when options not provided
-    if not n_opts:
-        relevant = [t for _, t in global_snippets if _is_relevant(t, query)]
-        return "\n\n".join(relevant or [t for _, t in global_snippets[:2]])[:1500]
+    ranked = sorted(range(n_opts), key=lambda i: scores[i], reverse=True)
+    print(f"  [RAG] Scores: { {i: round(scores[i], 1) for i in ranked} }")
 
-    # Isolated per-candidate buckets — each entry is (source, text)
-    buckets:     dict[int, list[tuple[str, str]]] = {i: [] for i in range(n_opts)}
-    seen_bucket: set[tuple]                        = set()
+    # ── Fallback su conoscenza LLM se nessuna evidenza ────────────────────────
+    if not shared and all(s == 0.0 for s in scores.values()):
+        print("  [RAG] No evidence → LLM fallback")
+        return ""
 
-    def _put(i: int, src: str, text: str) -> None:
-        k = (i, text[:60])
-        if k not in seen_bucket:
-            seen_bucket.add(k); buckets[i].append((src, text))
-
-    for i, hits in enumerate(cand_raw):
-        for s in hits: _put(i, "ddg", s)
-
-    for src, snippet in global_snippets:
-        snl = snippet.lower()
-        for i in range(n_opts):
-            opt_kws = _extract_keywords(option_texts[i])
-            if opt_kws and any(kw in snl for kw in opt_kws):
-                _put(i, src, snippet)
-
-    # Score buckets — DDG snippets weighted higher than Wikipedia
-    scores = {
-        i: sum(
-            _relation_score(text, option_texts[i], wiki_query) * _SOURCE_WEIGHT[src]
-            for src, text in buckets[i]
-        )
-        for i in range(n_opts)
-    }
-    sorted_opts = sorted(range(n_opts), key=lambda i: scores[i], reverse=True)
-    print(f"  [RAG-Ent] Scores: { {i: f'{scores[i]:.1f}' for i in sorted_opts} }")
-
-    # Format structured context
     parts: list[str] = []
-    shared = [t for _, t in global_snippets if _is_relevant(t, query)]
     if shared:
-        parts.append(f"CONTEXT:\n{shared[0][:500]}")
-    for i in sorted_opts:
-        label = f"[{i}] {option_texts[i]}"
-        parts.append(f"{label}:\n{buckets[i][0][1][:300]}" if buckets[i]
-                     else f"{label}: (no evidence)")
+        parts.append(f"CONTEXT:\n{shared[0][:700]}")
 
-    return "\n\n".join(parts)[:2000]
+    for i in ranked:
+        label = f"[{i}] {option_texts[i]}"
+        if opt_snips[i]:
+            parts.append(f"{label} (score {scores[i]:.1f}):\n{opt_snips[i][0][:300]}")
+        else:
+            parts.append(f"{label} (score {scores[i]:.1f}): (no specific evidence)")
+
+    return "\n\n".join(parts)[:2200]
