@@ -37,7 +37,6 @@ _TITLE_STOP_LOWER = {
     "between", "during", "after", "before", "about", "into",
 }
 _SOURCE_WEIGHT = {"wiki": 0.7, "ddg": 1.3}   # DDG precision > Wikipedia verbosity
-
 _RELATION_VERBS = frozenset({
     "starred", "starring", "stars", "directed", "directing", "directs",
     "released", "releasing", "wrote", "written", "writes",
@@ -48,6 +47,8 @@ _RELATION_VERBS = frozenset({
     "hosted", "hosting", "created", "creating", "won", "nominated",
 })
 
+# ── regex patterns ─────────────────────────────────────────────────────────────
+
 _UL = r'A-ZÀ-ÖØ-Ý'
 _AL = r'a-zA-ZÀ-ÖØ-öø-ÿ'
 _PROPER_NOUN_RE   = re.compile(rf'([{_UL}][{_AL}]+(?:\s+[{_UL}][{_AL}]+)+)')
@@ -57,6 +58,7 @@ _CAMEL_CASE_RE    = re.compile(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b')
 _QUESTION_WORDS   = re.compile(r'^(Which|What|How|Who|When|Where|Why)$')
 _YEAR_RE          = re.compile(r'\b(1[0-9]{3}|2[0-9]{3})\b')
 _SINGLE_PROPER_RE = re.compile(rf'\b([{_UL}][{_AL}]{{2,}})\b')
+_HYPHEN_NAME_RE   = re.compile(r'\b([A-Z][a-zA-Z]+-[A-Z][a-zA-Z0-9]*)\b')
 _Q_WHO            = re.compile(r'^\s*who\b', re.I)
 _Q_WHAT_WORK      = re.compile(
     r'^\s*what\s+(film|movie|show|series|song|album|track|record|role)\b', re.I
@@ -64,6 +66,43 @@ _Q_WHAT_WORK      = re.compile(
 _SENT_SPLIT_RE    = re.compile(r'(?<=[.!?])\s+')
 _CITE_RE          = re.compile(r'\[\d+\]')
 _WIKI_UA          = "PoliMillionaireBot/1.0 (university research project)"
+
+# ── entity type rules (used by Wikipedia candidate ranking) ────────────────────
+
+_CATEGORY_TYPE_RULES: dict[str, str] = {
+    "films":                "FILM",
+    "film":                 "FILM",
+    "albums":               "ALBUM",
+    "album":                "ALBUM",
+    "songs":                "SONG",
+    "song":                 "SONG",
+    "singles":              "SONG",
+    "television series":    "TV_SHOW",
+    "tv series":            "TV_SHOW",
+    "television shows":     "TV_SHOW",
+    "bands":                "BAND",
+    "musical groups":       "BAND",
+    "rock groups":          "BAND",
+    "actors":               "PERSON",
+    "actresses":            "PERSON",
+    "rappers":              "PERSON",
+    "musicians":            "PERSON",
+    "singers":              "PERSON",
+    "directors":            "PERSON",
+    "characters":           "CHARACTER",
+    "fictional characters": "CHARACTER",
+    "ships":                "SHIP",
+    "cities":               "PLACE",
+    "populated places":     "PLACE",
+}
+_QUESTION_TYPE_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\b(film|movie|directed|starred|released|box office|cinema)\b', re.I), "FILM"),
+    (re.compile(r'\b(tv show|television|series|episode|season|aired)\b',          re.I), "TV_SHOW"),
+    (re.compile(r'\b(song|single|track|lyrics|chorus|wrote the song)\b',           re.I), "SONG"),
+    (re.compile(r'\b(album|discography|record|label|studio album)\b',              re.I), "ALBUM"),
+    (re.compile(r'\b(band|group|formed|lead singer|drummer|guitarist)\b',          re.I), "BAND"),
+    (re.compile(r'\b(actor|actress|born|nationality|career|role)\b',               re.I), "PERSON"),
+]
 
 
 # ── snippet quality ───────────────────────────────────────────────────────────
@@ -82,29 +121,6 @@ def _is_quality_snippet(text: str, url: str = "") -> bool:
         if m and any(t in m.group(1) for t in _TRUSTED_DOMAINS):
             return True
     return len(s) >= 80 and len(sl.split()) >= 12
-
-
-# ── Wikipedia ─────────────────────────────────────────────────────────────────
-
-def _wiki(title: str) -> str:
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        f"?action=query&prop=extracts&exintro=false&explaintext=true"
-        f"&titles={urllib.parse.quote(title)}&format=json"
-    )
-    try:
-        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
-        if r.status_code == 200:
-            pages = r.json()["query"]["pages"]
-            text = _CITE_RE.sub("", pages[next(iter(pages))].get("extract", ""))
-            return text[:5000] if text else ""
-    except Exception:
-        pass
-    return ""
-
-
-def _wiki_is_useful(text: str) -> bool:
-    return bool(text) and len(text.strip()) >= 100 and "may refer to:" not in text.lower()
 
 
 # ── keyword extraction ────────────────────────────────────────────────────────
@@ -145,29 +161,6 @@ def _is_relevant(snippet: str, question: str, threshold: int = 2) -> bool:
 
 # ── query building ────────────────────────────────────────────────────────────
 
-def _build_wiki_query(query: str, question: str = "") -> str:
-    """Pick the most useful Wikipedia entity when multiple proper nouns exist."""
-    entities = _PROPER_NOUN_RE.findall(query)
-    if not entities:
-        return query
-    if len(entities) == 1:
-        return entities[0].strip()
-
-    _ARTS = {"the", "a", "an", "of"}
-    persons = [e for e in entities
-               if len(e.split()) == 2 and not any(w.lower() in _ARTS for w in e.split())]
-    works   = [e for e in entities if e.split()[0].lower() in _ARTS]
-    others  = [e for e in entities if e not in persons and e not in works]
-
-    if _Q_WHO.match(question):
-        ranked = works or persons or others        # "Who" → search the work for its cast
-    elif _Q_WHAT_WORK.match(question):
-        ranked = persons or works or others        # "What film" → search the person
-    else:
-        ranked = works or persons or others
-    return (ranked[0] if ranked else max(entities, key=len)).strip()
-
-
 def _build_query(question: str) -> tuple[str, int | str]:
     ysuf = f" {m.group(1)}" if (m := _YEAR_RE.search(question)) else ""
 
@@ -187,6 +180,12 @@ def _build_query(question: str) -> tuple[str, int | str]:
         entity = proper[0].strip()
         print(f"  [RAG-Ent] Proper: {entity!r}")
         return f"{entity}{ysuf}", 2
+
+    hyphen = _HYPHEN_NAME_RE.findall(question)
+    if hyphen:
+        entity = hyphen[0]
+        print(f"  [RAG-Ent] Hyphenated: {entity!r}")
+        return f"{entity}{ysuf}", "2d"
 
     words       = question.split()
     possessives = re.findall(rf"\b([{_UL}][{_AL}]{{2,}})'s\b", question)
@@ -213,10 +212,131 @@ def _build_query(question: str) -> tuple[str, int | str]:
     return question[:80], 3
 
 
+def _build_wiki_query(query: str, question: str = "") -> str:
+    """Pick the most useful Wikipedia entity when multiple proper nouns exist."""
+    entities = _PROPER_NOUN_RE.findall(query)
+    if not entities:
+        return query
+    if len(entities) == 1:
+        return entities[0].strip()
+
+    _ARTS = {"the", "a", "an", "of"}
+    persons = [e for e in entities
+               if len(e.split()) == 2 and not any(w.lower() in _ARTS for w in e.split())]
+    works   = [e for e in entities if e.split()[0].lower() in _ARTS]
+    others  = [e for e in entities if e not in persons and e not in works]
+
+    if _Q_WHO.match(question):
+        ranked = works or persons or others
+    elif _Q_WHAT_WORK.match(question):
+        ranked = persons or works or others
+    else:
+        ranked = works or persons or others
+    return (ranked[0] if ranked else max(entities, key=len)).strip()
+
+
 def _build_ddg_query(entity: str, question: str) -> str:
     ew    = set(entity.lower().split())
     extra = [kw for kw in _extract_keywords(question) if kw not in ew]
     return f"{entity} {' '.join(extra[:3])}".strip()[:80]
+
+
+# ── Wikipedia ─────────────────────────────────────────────────────────────────
+
+def _wiki_search(query: str) -> list[str]:
+    """OpenSearch: returns up to 5 candidate page titles."""
+    url = (
+        "https://en.wikipedia.org/w/api.php"
+        f"?action=opensearch&search={urllib.parse.quote(query)}&limit=5&format=json"
+    )
+    try:
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=3)
+        if r.status_code == 200:
+            return r.json()[1]
+    except Exception:
+        pass
+    return []
+
+
+def _wiki_categories(title: str) -> list[str]:
+    """Fetch lowercase Wikipedia category names (without 'Category:' prefix)."""
+    url = (
+        "https://en.wikipedia.org/w/api.php"
+        f"?action=query&prop=categories&cllimit=20"
+        f"&titles={urllib.parse.quote(title)}&format=json"
+    )
+    try:
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=3)
+        if r.status_code == 200:
+            pages = r.json()["query"]["pages"]
+            cats  = pages[next(iter(pages))].get("categories", [])
+            return [c["title"].removeprefix("Category:").lower() for c in cats]
+    except Exception:
+        pass
+    return []
+
+
+def _infer_wiki_types(categories: list[str]) -> set[str]:
+    types: set[str] = set()
+    for cat in categories:
+        for keyword, entity_type in _CATEGORY_TYPE_RULES.items():
+            if keyword in cat:
+                types.add(entity_type)
+    return types
+
+
+def _infer_expected_type(question: str) -> str | None:
+    for pattern, entity_type in _QUESTION_TYPE_RULES:
+        if pattern.search(question):
+            return entity_type
+    return None
+
+
+def _pick_wiki_title(candidates: list[str], question: str) -> str:
+    """
+    Pick the most relevant page from OpenSearch candidates.
+    Score = verbatim match length + category type match (+5).
+    Longer titles checked first so 'Titanic (1997 film)' can beat plain 'Titanic'.
+    """
+    valid = [c for c in candidates
+             if "(disambiguation)" not in c.lower() and "(name)" not in c.lower()]
+    if not valid:
+        valid = candidates
+
+    expected_type = _infer_expected_type(question)
+    q_lower       = question.lower()
+
+    def _score(title: str) -> float:
+        pat      = r'(?<![a-zA-Z0-9])' + re.escape(title.lower()) + r'(?![a-zA-Z0-9])'
+        verbatim = len(title) if re.search(pat, q_lower) else 0
+        cats     = _wiki_categories(title) if (verbatim or expected_type) else []
+        types    = _infer_wiki_types(cats)
+        return verbatim + (5.0 if expected_type and expected_type in types else 0.0)
+
+    return max(valid, key=_score)
+
+
+def _wiki(query: str, question: str = "") -> str:
+    candidates = _wiki_search(query)
+    title = _pick_wiki_title(candidates, question or query) if candidates else query
+    url = (
+        "https://en.wikipedia.org/w/api.php"
+        f"?action=query&prop=extracts&exintro=false&explaintext=true"
+        f"&titles={urllib.parse.quote(title)}&format=json"
+    )
+    try:
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=4)
+        if r.status_code == 200:
+            pages = r.json()["query"]["pages"]
+            text = _CITE_RE.sub("", pages[next(iter(pages))].get("extract", ""))
+            return text[:5000] if text else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _wiki_is_useful(text: str) -> bool:
+    return bool(text) and len(text.strip()) >= 100 and "may refer to:" not in text.lower()
 
 
 # ── fetch ─────────────────────────────────────────────────────────────────────
@@ -291,7 +411,7 @@ def rag_entertainment(query: str, num_results: int = 3,
     cand_queries = [f"{option_texts[i].strip()[:35]} {wiki_query}"[:80] for i in range(n_opts)]
 
     pool      = concurrent.futures.ThreadPoolExecutor(max_workers=2 + n_opts)
-    wiki_fut  = pool.submit(_wiki, wiki_query)
+    wiki_fut  = pool.submit(_wiki, wiki_query, query)
     ddg_fut   = pool.submit(_fetch_ddg, ddg_query, num_results)
     cand_futs = [pool.submit(_fetch_ddg, cq, 1) for cq in cand_queries]
 
