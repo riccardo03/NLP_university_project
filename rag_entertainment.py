@@ -64,6 +64,9 @@ _Q_WHAT_WORK      = re.compile(
     r'^\s*what\s+(film|movie|show|series|song|album|track|record|role)\b', re.I
 )
 _SENT_SPLIT_RE    = re.compile(r'(?<=[.!?])\s+')
+_COMPARE_RE       = re.compile(
+    r'\b(differ|difference|compare|versus|\bvs\b|between|contrast|relation|relationship)\b', re.I
+)
 _CITE_RE          = re.compile(r'\[\d+\]')
 _WIKI_UA          = "PoliMillionaireBot/1.0 (university research project)"
 
@@ -164,10 +167,26 @@ def _is_relevant(snippet: str, question: str, threshold: int = 2) -> bool:
 def _build_query(question: str) -> tuple[str, int | str]:
     ysuf = f" {m.group(1)}" if (m := _YEAR_RE.search(question)) else ""
 
-    quoted = _QUOTED_TITLE_RE.findall(question)
+    # Collect all quoted titles, deduplicated, preserving order
+    quoted = list(dict.fromkeys(t.strip() for t in _QUOTED_TITLE_RE.findall(question) if t.strip()))
+
+    if len(quoted) >= 2:
+        # Multiple quoted titles: combine first two.
+        # Use _COMPARE_RE to label the debug message accurately.
+        t1, t2 = quoted[0], quoted[1]
+        label = "Comparison" if _COMPARE_RE.search(question) else "Multi-title"
+        print(f"  [RAG-Ent] {label}: {t1!r} + {t2!r}")
+        return f"{t1} {t2}{ysuf}", "1a-multi"
+
     if quoted:
-        title  = max(quoted, key=len).strip()
-        proper = _PROPER_NOUN_RE.findall(question)
+        title = quoted[0]
+        tl    = title.lower()
+        # Exclude proper nouns that are the title itself or a substring of it —
+        # _PROPER_NOUN_RE would otherwise re-match words inside the quoted text.
+        proper = [
+            e for e in _PROPER_NOUN_RE.findall(question)
+            if e.lower() != tl and e.lower() not in tl
+        ]
         if proper:
             entity = proper[0].strip()
             print(f"  [RAG-Ent] Relation: {entity!r} + {title!r}")
