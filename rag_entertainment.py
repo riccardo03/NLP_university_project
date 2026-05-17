@@ -96,6 +96,11 @@ def _keywords(text: str) -> set[str]:
     return {t for t in _tokenize(text) if len(t) >= 3 and t not in _STOP_WORDS}
 
 
+def _clean_query_text(text: str) -> str:
+    kept = [w for w in text.split() if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS]
+    return " ".join(kept) if kept else text
+
+
 # ── Estrazione soggetti ───────────────────────────────────────────────────────
 
 def _extract_subjects_regex(question: str) -> list[str]:
@@ -335,7 +340,14 @@ def _score_option(option: str, subjects: list[str], snippets: list[str],
         return lexical
 
     semantic = _semantic_score(option, snippets, question)
-    return 0.5 * lexical + 0.5 * semantic
+
+    abstract_keywords = {
+        "principle", "concept", "reason", "fundamental",
+        "why", "how", "purpose", "significance", "mean", "represents"
+    }
+    is_abstract = any(kw in question.lower() for kw in abstract_keywords)
+    weight_lex, weight_sem = (0.2, 0.8) if is_abstract else (0.5, 0.5)
+    return weight_lex * lexical + weight_sem * semantic
 
 
 # ── Pipeline principale ───────────────────────────────────────────────────────
@@ -368,8 +380,8 @@ def rag_entertainment(query: str, num_results: int = 3,
     n_opts = min(len(option_texts), 4)
 
     cand_queries = [
-        f"{opt.strip()[:50]} {subj_str}".strip()[:90]
-        for opt in option_texts[:n_opts]
+        f"{_clean_query_text(option_texts[i])[:50]} {subj_str}".strip()[:90]
+        for i in range(n_opts)
     ]
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 2)

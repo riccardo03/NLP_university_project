@@ -66,7 +66,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     warmup_models()
 
 
-def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 10, **kwargs) -> str:
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 150, **kwargs) -> str:
     if _pipe is None:
         raise RuntimeError("You must call load_model() first.")
 
@@ -78,7 +78,7 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     temperature = 0.1
     outputs = _pipe(
         messages,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=150,
         do_sample=do_sample,
         temperature=temperature,
     )
