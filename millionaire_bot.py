@@ -75,7 +75,7 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "user",   "content": user_prompt},
     ]
     do_sample   = True
-    temperature = 0.5
+    temperature = 0.1
     outputs = _pipe(
         messages,
         max_new_tokens=max_new_tokens,
