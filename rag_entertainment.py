@@ -67,6 +67,11 @@ _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
 
+_ABSTRACT_KEYWORDS = frozenset({
+    "principle", "concept", "reason", "fundamental",
+    "why", "how", "purpose", "significance", "mean", "represents"
+})
+
 # ── Lazy GLiNER model ────────────────────────────────────────────────────────
 
 _gliner_model = None
@@ -166,6 +171,7 @@ def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
 
 # ── Ricerca: Wikipedia ────────────────────────────────────────────────────────
 
+@lru_cache(maxsize=64)
 def _wiki_lookup(query: str) -> str:
     """list=search → primo titolo non-ambiguo → estratto pulito."""
     try:
@@ -237,6 +243,7 @@ def _wiki_relevant_passages(wiki_text: str, question: str,
 
 # ── Ricerca: DuckDuckGo ───────────────────────────────────────────────────────
 
+@lru_cache(maxsize=128)
 def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
     """Lista di snippet (titolo + body) per la query data."""
     try:
@@ -337,37 +344,21 @@ def _score_option(option: str, subjects: list[str], snippets: list[str],
         verb_bonus = min(sum(1 for w in words if w in _RELATION_VERBS) * 0.25, 1.0)
         lexical += coverage + verb_bonus
 
-    # ─ Se no question, return solo lexical
     if not question:
         return lexical
 
-    # ─ SEMANTIC SCORE (batch encoding)
+    query_emb = _embed(f"{question} {option}"[:256])
     semantic = 0.0
-    if snippets:
-        try:
-            model = _get_embed_model()
-            if model is not None:
-                query_text = f"{question} {option}"[:256]
-                texts_to_embed = [query_text] + [s[:256] for s in snippets[:3]]
-                embeddings = model.encode(texts_to_embed, normalize_embeddings=True)
-                query_emb = embeddings[0]
-                snip_embs = embeddings[1:]
-                if snip_embs:
-                    semantic = max(
-                        (query_emb @ snip_emb).item() 
-                        for snip_emb in snip_embs
-                    )
-        except Exception:
-            pass
+    if query_emb:
+        semantic = max(
+            (_cosine(query_emb, snip_emb)
+             for snip in snippets[:3]
+             if (snip_emb := _embed(snip[:256]))),
+            default=0.0,
+        )
 
-    # ─ WEIGHTING (dynamic per abstract questions)
-    abstract_keywords = {
-        "principle", "concept", "reason", "fundamental",
-        "why", "how", "purpose", "significance", "mean", "represents"
-    }
-    is_abstract = any(kw in question.lower() for kw in abstract_keywords)
+    is_abstract = any(kw in question.lower() for kw in _ABSTRACT_KEYWORDS)
     weight_lex, weight_sem = (0.2, 0.8) if is_abstract else (0.5, 0.5)
-    
     return weight_lex * lexical + weight_sem * semantic
 
 # ── Pipeline principale ───────────────────────────────────────────────────────
