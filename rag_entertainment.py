@@ -311,13 +311,15 @@ def _semantic_score(option: str, snippets: list[str], question: str) -> float:
 
 def _score_option(option: str, subjects: list[str], snippets: list[str],
                   question: str = "") -> float:
-
+    """Lexical + semantic scoring con batch encoding."""
+    
     opt_kws = _keywords(option)
     if not opt_kws:
         return 0.0
 
     subj_kws = {k for s in subjects for k in _keywords(s)}
 
+    # ─ LEXICAL SCORE (come prima)
     lexical = 0.0
     for snip in snippets:
         if not snip:
@@ -335,19 +337,38 @@ def _score_option(option: str, subjects: list[str], snippets: list[str],
         verb_bonus = min(sum(1 for w in words if w in _RELATION_VERBS) * 0.25, 1.0)
         lexical += coverage + verb_bonus
 
+    # ─ Se no question, return solo lexical
     if not question:
         return lexical
 
-    semantic = _semantic_score(option, snippets, question)
+    # ─ SEMANTIC SCORE (batch encoding)
+    semantic = 0.0
+    if snippets:
+        try:
+            model = _get_embed_model()
+            if model is not None:
+                query_text = f"{question} {option}"[:256]
+                texts_to_embed = [query_text] + [s[:256] for s in snippets[:3]]
+                embeddings = model.encode(texts_to_embed, normalize_embeddings=True)
+                query_emb = embeddings[0]
+                snip_embs = embeddings[1:]
+                if snip_embs:
+                    semantic = max(
+                        (query_emb @ snip_emb).item() 
+                        for snip_emb in snip_embs
+                    )
+        except Exception:
+            pass
 
+    # ─ WEIGHTING (dynamic per abstract questions)
     abstract_keywords = {
         "principle", "concept", "reason", "fundamental",
         "why", "how", "purpose", "significance", "mean", "represents"
     }
     is_abstract = any(kw in question.lower() for kw in abstract_keywords)
     weight_lex, weight_sem = (0.2, 0.8) if is_abstract else (0.5, 0.5)
+    
     return weight_lex * lexical + weight_sem * semantic
-
 
 # ── Pipeline principale ───────────────────────────────────────────────────────
 
