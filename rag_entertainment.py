@@ -294,19 +294,18 @@ def _cosine(a: tuple, b: tuple) -> float:
 
 
 def _semantic_score(option: str, snippets: list[str], question: str) -> float:
-    """Max cosine similarity between (question + option) and each snippet."""
+    """Max cosine similarity tra (question + option) e top snippet."""
     if not snippets:
         return 0.0
     query_emb = _embed(f"{question} {option}"[:256])
     if not query_emb:
         return 0.0
     best = 0.0
-    for snip in snippets[:5]:
+    for snip in snippets[:1]:  # ← CAMBIA DA 5 A 1
         snip_emb = _embed(snip[:256])
         if snip_emb:
             best = max(best, _cosine(query_emb, snip_emb))
     return best
-
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
