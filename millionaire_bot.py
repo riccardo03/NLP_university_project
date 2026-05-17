@@ -14,6 +14,7 @@ from rag_entertainment import rag_entertainment
 from rag_history      import rag_history
 from rag_science      import rag_science
 from rag_maths        import rag_maths
+from typing import Optional
 
 warnings.filterwarnings("ignore")
 transformers_logging.set_verbosity_error()
@@ -36,6 +37,9 @@ _MAX_TOKENS = {
     COMP_SCIENCE_NATURE:   30,
     COMP_MATHS:            30,
 }
+
+
+# (Science RAG moved back to rag_science.py)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 2 · Model loading
@@ -64,6 +68,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
 
     print("The model is ready to answer.")
     warmup_models()
+    # Initialize science RAG now that the model and environment are ready.
+    try:
+        import rag_science
+        rag_science.setup_science_rag()
+    except Exception as e:
+        print(f"Warning: science RAG setup failed: {e}")
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 150, **kwargs) -> str:
@@ -144,23 +154,9 @@ SYSTEM_PROMPTS = {
     ),
 
     COMP_SCIENCE_NATURE: (
-        "You are a world-class Scientist with expertise in Physics, Chemistry, Biology, and Earth Sciences. "
-        "Your goal is to identify the correct answer (0, 1, 2, or 3) with absolute empirical accuracy. "
-        "HIERARCHY OF TRUTH: "
-        "1. PROVIDED CONTEXT: If the context contains specific data (constants, formulas, dates, or names), "
-        "you MUST prioritize it over your internal training data. "
-        "2. SCIENTIFIC KNOWLEDGE: Use your internal expertise only if the context is missing or irrelevant "
-        "to the specific scientific fact asked. "
-        "OPERATIONAL RULES: "
-        "- TECHNICAL PRECISION: Pay extreme attention to units of measurement, chemical symbols "
-        "(e.g., distinguish 'Au' from 'Ag'), and taxonomic names. "
-        "- ELIMINATION: Evaluate each option against the context. If an option contradicts a physical law "
-        "or a fact in the context, eliminate it. "
-        "- DATA MATCHING: If the question asks for a value (e.g., a boiling point or distance), "
-        "match the number exactly as it appears in the context. "
-        "OUTPUT FORMAT: "
-        "The VERY FIRST LINE of your response must be exactly: ANSWER: <digit>. "
-        "Then provide a 1-sentence logical deduction explaining why."
+        "You are a careful science tutor. Use the provided context to answer "
+        "multiple-choice science questions. Reason briefly (2-4 sentences), "
+        "then end with EXACTLY one line: 'Answer: [N]' where N is 0, 1, 2, or 3."
     ),
 
     COMP_MATHS: (
@@ -215,7 +211,7 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
-        return rag_science(question_text, option_texts or [], generate_answer_fn=generate_answer)
+        return rag_science(question_text, option_texts or [])
     elif comp_id == COMP_MATHS:
         return rag_maths(question_text)
     return ""
