@@ -54,7 +54,7 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     print(f"      {_science_passages and len(_science_passages) or 0:,} passages")
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
-    _science_embedder = SentenceTransformer(embed_model, device="cuda")
+    _science_embedder = SentenceTransformer(embed_model, device="cpu")
     emb = _science_embedder.encode(
         _science_passages,
         batch_size=256,
