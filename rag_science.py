@@ -7,7 +7,8 @@
 
 import re
 from typing import Optional
-
+import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # Science RAG resources (corpus, embedder, and retrieval)
 # ---------------------------------------------------------------------------
@@ -54,10 +55,10 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     print(f"      {_science_passages and len(_science_passages) or 0:,} passages")
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
-    _science_embedder = SentenceTransformer(embed_model, device="cpu")
+    _science_embedder = SentenceTransformer(embed_model, device="cuda")
     emb = _science_embedder.encode(
         _science_passages,
-        batch_size=256,
+        batch_size=32,
         show_progress_bar=True,
         normalize_embeddings=True,
         convert_to_numpy=True,
