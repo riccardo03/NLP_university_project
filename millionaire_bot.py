@@ -32,10 +32,10 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    30,
-    COMP_HISTORY_POLITICS: 30,
-    COMP_SCIENCE_NATURE:   30,
-    COMP_MATHS:            30,
+    COMP_ENTERTAINMENT:    50,
+    COMP_HISTORY_POLITICS: 50,
+    COMP_SCIENCE_NATURE:   50,
+    COMP_MATHS:            50,
 }
 
 
@@ -88,7 +88,7 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     temperature = 0.1
     outputs = _pipe(
         messages,
-        max_new_tokens=150,
+        max_new_tokens=50,
         do_sample=do_sample,
         temperature=temperature,
     )

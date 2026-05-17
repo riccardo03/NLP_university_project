@@ -76,9 +76,14 @@ def science_retrieve(query: str, k: int = SCIENCE_TOP_K) -> list:
     global _science_embedder, _science_index, _science_passages
     if _science_embedder is None:
         raise RuntimeError("Science RAG is not initialized. Call setup_science_rag() first.")
+    print(f"  [RAG-Sci] FAISS search | query: {query[:80]!r} | k={k}")
     q = _science_embedder.encode([query], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
-    _, idx = _science_index.search(q, k)
-    return [_science_passages[i] for i in idx[0]]
+    distances, idx = _science_index.search(q, k)
+    results = [_science_passages[i] for i in idx[0]]
+    print(f"  [RAG-Sci] Top-{k} scores: {[round(float(d), 3) for d in distances[0]]}")
+    for rank, (passage, score) in enumerate(zip(results, distances[0])):
+        print(f"    [{rank}] score={score:.3f} | {passage[:100]}…")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,7 @@ def rag_science(query: str, option_texts: Optional[list] = None) -> str:
         if stem.upper().startswith("Q:"):
             stem = stem[2:].strip()
         options = [str(o).strip().rstrip(".") for o in option_texts]
+        print(f"  [RAG-Sci] stem (from arg): {stem!r}")
     else:
         stem, options = _parse_question(query)
         if stem is None:
@@ -126,11 +132,16 @@ def rag_science(query: str, option_texts: Optional[list] = None) -> str:
                 "Could not parse [0]/[1]/[2]/[3] options from query, "
                 "and no option_texts argument was provided."
             )
+        print(f"  [RAG-Sci] stem (parsed): {stem!r}")
+
+    print(f"  [RAG-Sci] options: {options}")
 
     # ---- Retrieve (delegated) -------------------------------------------
     # Including options in the query covers the answer space, not just the stem.
     retrieval_query = stem + " " + " ".join(options)
+    print(f"  [RAG-Sci] retrieval query: {retrieval_query[:120]!r}")
     contexts = _retrieve(retrieval_query, k=None)
+    print(f"  [RAG-Sci] retrieved {len(contexts)} passages, total chars: {sum(len(c) for c in contexts)}")
 
     return "\n\n".join(contexts)
 
