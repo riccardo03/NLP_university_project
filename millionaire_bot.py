@@ -32,10 +32,10 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    50,
-    COMP_HISTORY_POLITICS: 50,
-    COMP_SCIENCE_NATURE:   50,
-    COMP_MATHS:            50,
+    COMP_ENTERTAINMENT:    30,
+    COMP_HISTORY_POLITICS: 30,
+    COMP_SCIENCE_NATURE:   30,
+    COMP_MATHS:            30,
 }
 
 
@@ -76,7 +76,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         print(f"Warning: science RAG setup failed: {e}")
 
 
-def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 150, **kwargs) -> str:
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 30, **kwargs) -> str:
     if _pipe is None:
         raise RuntimeError("You must call load_model() first.")
 
@@ -88,7 +88,7 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     temperature = 0.1
     outputs = _pipe(
         messages,
-        max_new_tokens=50,
+        max_new_tokens=max_new_tokens,
         do_sample=do_sample,
         temperature=temperature,
     )
