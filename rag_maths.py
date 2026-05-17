@@ -1,458 +1,312 @@
 """
-RAG pipeline for the Mathematics competition.
-Single LLM strategy call → Wikipedia formula lookup → minimal DDG fallback.
-Optimised for latency: target < 10s total, leaving time for computation.
+    Corpus    : Hendrycks MATH dataset + curated math facts and formulas
+    Embedder  : BAAI/bge-small-en-v1.5         (~500 MB VRAM)
+    Vector DB : FAISS IndexFlatIP (cosine via normalised vectors)
 """
 
 import re
-import math
+import os
 from typing import Optional
-from math_formulas import search_formula, format_formula_context
 
-_ARTICLE_REF_RE = re.compile(
-    r"\b(according to (the )?(article|text|passage|paragraph|excerpt))\b",
-    re.I,
-)
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-_MATH_STRATEGY_SYSTEM = (
-    "You are a search strategist for a mathematics quiz bot. "
-    "Given a question and its options, decide whether a web lookup is needed.\n"
-    "\n"
-    "If the question is a PURE arithmetic or numerical computation that needs no formula "
-    "recall (e.g. '12 × 7', 'what is 15% of 80', 'what is 2^10'), output exactly:\n"
-    "SKIP\n"
-    "\n"
-    "Otherwise output ONE line with this EXACT format (no other text):\n"
-    "QUERY: <mathematical concept or formula in 2-5 words> | CATEGORY: <category>\n"
-    "\n"
-    "CATEGORY must be exactly one of:\n"
-    "  Algebra       — equations, polynomials, matrices, sequences, series.\n"
-    "  Geometry      — shapes, area, volume, trigonometry, vectors, coordinates.\n"
-    "  Calculus      — derivatives, integrals, limits, differential equations.\n"
-    "  Probability   — probability, statistics, combinations, permutations.\n"
-    "  Constants     — named constants: pi, e, golden ratio, speed of light, etc.\n"
-    "  NumberTheory  — primes, divisibility, modular arithmetic, factorials.\n"
-    "  Logic         — sets, logic, proof, boolean algebra.\n"
-    "  General       — any mathematical topic not covered above.\n"
-    "\n"
-    "Rules for QUERY:\n"
-    "- Use precise mathematical terminology (e.g. 'Pythagorean theorem', "
-    "'binomial coefficient', 'Euler number').\n"
-    "- 2 to 5 words. No question words. No punctuation at end.\n"
-    "\n"
-    "Examples:\n"
-    "Q: What is the formula for the area of a circle? → "
-    "QUERY: area circle formula | CATEGORY: Geometry\n"
-    "Q: What is 345 divided by 15? → SKIP\n"
-    "Q: What is the derivative of sin(x)? → "
-    "QUERY: derivative sine function | CATEGORY: Calculus\n"
-    "Q: How many combinations of 5 items from 10? → "
-    "QUERY: binomial coefficient combination formula | CATEGORY: Probability\n"
-    "Q: What is the value of pi to 5 decimal places? → "
-    "QUERY: pi mathematical constant | CATEGORY: Constants\n"
-    "Q: What is the sum of the first n natural numbers? → "
-    "QUERY: sum natural numbers formula | CATEGORY: Algebra\n"
-)
+# Math RAG resources (corpus, embedder, and retrieval)
+# ---------------------------------------------------------------------------
+_maths_embedder = None
+_maths_index = None
+_maths_passages = None
 
-_MATH_STOP_WORDS = {
-    "what", "when", "which", "where", "does", "have", "this", "that",
-    "from", "with", "about", "into", "their", "there", "been", "were",
-    "would", "could", "should", "following", "give", "find", "calculate",
-    "compute", "evaluate", "solve", "determine", "express",
-}
-
-# Greek letters and their names for keyword extraction
-_GREEK_LETTERS = {
-    "π": "pi", "Π": "pi",
-    "α": "alpha", "Α": "alpha",
-    "β": "beta", "Β": "beta",
-    "γ": "gamma", "Γ": "gamma",
-    "δ": "delta", "Δ": "delta",
-    "ε": "epsilon", "Ε": "epsilon",
-    "ζ": "zeta", "Ζ": "zeta",
-    "η": "eta", "Η": "eta",
-    "θ": "theta", "Θ": "theta",
-    "λ": "lambda", "Λ": "lambda",
-    "μ": "mu", "Μ": "mu",
-    "σ": "sigma", "Σ": "sigma",
-    "τ": "tau", "Τ": "tau",
-    "φ": "phi", "Φ": "phi",
-    "ψ": "psi", "Ψ": "psi",
-    "ω": "omega", "Ω": "omega",
-    "∞": "infinity",
-}
-
-# Mathematical symbols and their semantic meaning
-_MATH_SYMBOLS = {
-    "√": "square root",
-    "∛": "cube root",
-    "∫": "integral",
-    "∑": "summation sum",
-    "∏": "product",
-    "∂": "partial derivative",
-    "∇": "nabla gradient",
-    "∝": "proportional",
-    "≈": "approximately",
-    "≠": "not equal",
-    "≤": "less than or equal",
-    "≥": "greater than or equal",
-    "∞": "infinity",
-    "∈": "element of",
-    "∉": "not element of",
-    "⊂": "subset",
-    "∪": "union",
-    "∩": "intersection",
-    "!": "factorial",
-    "^": "power exponent",
-}
-
-# Common math function and operator terms
-_MATH_FUNCTIONS = {
-    "sine", "sin", "cosine", "cos", "tangent", "tan",
-    "derivative", "integral", "limit", "sum", "product",
-    "logarithm", "log", "exponential", "exp",
-    "square", "cube", "root", "power",
-    "factorial", "permutation", "combination",
-    "determinant", "matrix", "eigenvector", "eigenvalue",
-}
-
-_USEFUL_SECTIONS_RE = re.compile(
-    r'^(formula|definition|theorem|proof|properties|notation|'
-    r'statement|rule|law|equation|expression)',
-    re.I,
-)
-_CITATION_RE = re.compile(r'\[\d+\]|\[citation needed\]|\[clarification needed\]', re.I)
-
-# ------------------------------------------------------------------ #
-# Symbolic computation helpers (kept for inline arithmetic enrichment)  #
-# ------------------------------------------------------------------ #
-_WORD_NUMBERS = {
-    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
-    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
-    "half": 0.5, "quarter": 0.25, "third": 1/3, "eighth": 0.125,
-}
+MATHS_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+MATHS_TOP_K = 5
 
 
-def _word_to_num(text: str) -> str:
-    for word, val in _WORD_NUMBERS.items():
-        text = re.sub(rf"\b{word}\b", str(val), text, flags=re.I)
+# ---------------------------------------------------------------------------
+# LaTeX cleanup (the MATH dataset is heavy in LaTeX, which confuses embedders)
+# ---------------------------------------------------------------------------
+def _clean_latex(text: str) -> str:
+    """Convert common LaTeX into plain-text equivalents for better embedding."""
+    if not text:
+        return text
+    # Fractions and roots
+    text = re.sub(r'\\d?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}', r'(\1)/(\2)', text)
+    text = re.sub(r'\\sqrt\s*\{([^{}]*)\}', r'sqrt(\1)', text)
+    # Operators
+    text = re.sub(r'\\times\b', '*', text)
+    text = re.sub(r'\\cdot\b', '*', text)
+    text = re.sub(r'\\div\b', '/', text)
+    text = re.sub(r'\\leq?\b', '<=', text)
+    text = re.sub(r'\\geq?\b', '>=', text)
+    text = re.sub(r'\\neq?\b', '!=', text)
+    text = re.sub(r'\\pm\b', '+/-', text)
+    # Greek letters and common symbols
+    for greek in ['pi', 'theta', 'alpha', 'beta', 'gamma', 'delta', 'sigma',
+                  'mu', 'lambda', 'phi', 'rho', 'tau', 'omega', 'epsilon']:
+        text = re.sub(rf'\\{greek}\b', greek, text)
+    text = re.sub(r'\\sum\b', 'sum', text)
+    text = re.sub(r'\\int\b', 'integral', text)
+    text = re.sub(r'\\prod\b', 'product', text)
+    text = re.sub(r'\\infty\b', 'infinity', text)
+    # Strip leftover LaTeX commands and grouping braces
+    text = re.sub(r'\\[a-zA-Z]+\*?\s*', ' ', text)
+    text = re.sub(r'[{}]', ' ', text)
+    text = re.sub(r'\$+', ' ', text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
-def _eval_expr(expr: str) -> Optional[float]:
-    safe_names = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
-    safe_names["abs"] = abs
+# ---------------------------------------------------------------------------
+# Curated facts (comprehensive coverage of common math domains)
+# ---------------------------------------------------------------------------
+_CURATED_MATH_FACTS = [
+    # ── Linear algebra ───────────────────────────────────────────────────────
+    "Matrix multiplication: if matrix A has dimensions m by n and matrix B has dimensions n by p, then the product AB has dimensions m by p. The number of columns in A must equal the number of rows in B.",
+    "For the product AB to be defined, the inner dimensions must match: A is m by n, B is n by p, result AB is m by p.",
+    "The determinant of a 2 by 2 matrix [[a,b],[c,d]] equals ad minus bc.",
+    "An invertible (non-singular) matrix has a non-zero determinant.",
+    "Matrix multiplication is not commutative in general: AB is usually not equal to BA.",
+    "The transpose of a matrix swaps its rows and columns. (A^T)_ij = A_ji.",
+    "Eigenvalues are scalars lambda such that A v = lambda v for some non-zero eigenvector v.",
+    "The rank of a matrix is the maximum number of linearly independent rows or columns.",
+    "An orthogonal matrix Q satisfies Q^T Q = I, so its inverse equals its transpose.",
+    "The identity matrix I has 1s on the diagonal and 0s elsewhere; AI = IA = A.",
+    "A square matrix is symmetric if A = A^T.",
+
+    # ── Calculus ─────────────────────────────────────────────────────────────
+    "The derivative measures the instantaneous rate of change of a function.",
+    "Power rule: the derivative of x^n is n times x^(n-1).",
+    "Chain rule: the derivative of f(g(x)) equals f'(g(x)) times g'(x).",
+    "Product rule: the derivative of f(x)*g(x) is f'(x)*g(x) + f(x)*g'(x).",
+    "Quotient rule: derivative of f/g is (f'g - fg')/g^2.",
+    "The derivative of sin(x) is cos(x), and the derivative of cos(x) is -sin(x).",
+    "The derivative of e^x is e^x. The derivative of ln(x) is 1/x.",
+    "The integral is the antiderivative; the definite integral represents the area under a curve.",
+    "Integration by parts: integral of u dv equals u*v minus integral of v du.",
+    "The Fundamental Theorem of Calculus links derivatives and integrals: integral from a to b of f'(x) dx = f(b) - f(a).",
+    "A function is continuous at a point if its limit equals its value there.",
+    "A function has a local maximum where its derivative changes from positive to negative.",
+
+    # ── Statistics ───────────────────────────────────────────────────────────
+    "The mean (average) of a dataset is the sum of all values divided by the number of values.",
+    "The median is the middle value when data is sorted; for even-sized datasets, it's the average of the two middle values.",
+    "The mode is the value that appears most frequently in a dataset.",
+    "The variance measures how spread out values are from the mean. It is the average of squared deviations from the mean.",
+    "Standard deviation is the square root of the variance and is in the same units as the data.",
+    "A normal distribution is symmetric, bell-shaped, and characterized by its mean and standard deviation.",
+    "In a normal distribution, about 68% of data falls within 1 standard deviation of the mean, 95% within 2, and 99.7% within 3 (the 68-95-99.7 rule).",
+    "The z-test is used when comparing means and the population standard deviation is known, or for large samples (n >= 30).",
+    "The t-test is used when comparing means and the population standard deviation is unknown, typically for smaller samples.",
+    "A two-sample t-test compares the means of two independent groups when population standard deviations are unknown.",
+    "A two-sample z-test compares the means of two independent groups when population standard deviations are known.",
+    "A paired or one-sample t-test on differences is used when the two samples are matched or dependent (e.g., before/after measurements).",
+    "When comparing salaries of two independent groups (like math teachers vs English teachers) with unknown population standard deviations, a two-sample t-test of population means is most appropriate.",
+    "The Central Limit Theorem: the distribution of sample means approaches a normal distribution as sample size increases, regardless of the population's distribution.",
+    "Correlation coefficient r measures the strength and direction of a linear relationship between two variables, ranging from -1 to 1.",
+    "A p-value below the significance level (commonly 0.05) leads to rejecting the null hypothesis.",
+    "Type I error is rejecting a true null hypothesis (false positive). Type II error is failing to reject a false null hypothesis (false negative).",
+    "Confidence interval: a range of values likely to contain the true population parameter, e.g., a 95% CI captures the true mean 95% of the time over repeated sampling.",
+
+    # ── Probability ──────────────────────────────────────────────────────────
+    "For independent events A and B: P(A and B) = P(A) * P(B). This product rule is the defining property of independence.",
+    "Two events are independent if the occurrence of one does not affect the probability of the other.",
+    "Independence and mutual exclusivity are different: independent events can both occur; mutually exclusive events cannot occur together.",
+    "If two events with nonzero probability are independent, they cannot be mutually exclusive (and vice versa).",
+    "Conditional probability: P(A given B) = P(A and B) / P(B), provided P(B) > 0.",
+    "If A and B are independent, then P(A given B) = P(A) and P(B given A) = P(B).",
+    "Bayes' theorem: P(A given B) = P(B given A) * P(A) / P(B).",
+    "P(A or B) = P(A) + P(B) - P(A and B). For mutually exclusive events, P(A and B) = 0.",
+    "The complement rule: P(not A) = 1 - P(A).",
+    "Expected value of a discrete random variable: E[X] = sum over i of x_i * P(X = x_i).",
+    "Variance of a random variable: Var(X) = E[X^2] - (E[X])^2.",
+
+    # ── Geometry ─────────────────────────────────────────────────────────────
+    "Area of a triangle: (1/2) * base * height.",
+    "Area of an equilateral triangle with side length s: (s^2 * sqrt(3)) / 4.",
+    "For an equilateral triangle with side 12, area is (144 * sqrt(3)) / 4 = 36 * sqrt(3), approximately 62.35.",
+    "Pythagorean theorem: in a right triangle, a^2 + b^2 = c^2 where c is the hypotenuse.",
+    "Area of a rectangle: length * width. Perimeter: 2 * (length + width).",
+    "Area of a circle: pi * r^2. Circumference: 2 * pi * r.",
+    "Area of a trapezoid: (1/2) * (b1 + b2) * h, where b1 and b2 are parallel sides.",
+    "Area of a parallelogram: base * height.",
+    "Volume of a sphere: (4/3) * pi * r^3. Surface area: 4 * pi * r^2.",
+    "Volume of a cylinder: pi * r^2 * h. Volume of a cone: (1/3) * pi * r^2 * h.",
+    "Volume of a rectangular prism: length * width * height.",
+    "The sum of interior angles of an n-sided polygon is (n - 2) * 180 degrees.",
+    "Sum of interior angles of a triangle is 180 degrees; for a quadrilateral, 360 degrees.",
+    "Similar triangles have corresponding angles equal and corresponding sides proportional.",
+    "Congruent triangles have all corresponding sides and angles equal.",
+    "Trigonometric ratios in a right triangle: sin = opposite/hypotenuse, cos = adjacent/hypotenuse, tan = opposite/adjacent.",
+    "Law of cosines: c^2 = a^2 + b^2 - 2ab*cos(C). Law of sines: a/sin(A) = b/sin(B) = c/sin(C).",
+    "Distance between points (x1,y1) and (x2,y2): sqrt((x2-x1)^2 + (y2-y1)^2).",
+    "Slope of a line between (x1,y1) and (x2,y2): (y2 - y1) / (x2 - x1).",
+    "Equation of a line: y = mx + b, where m is the slope and b is the y-intercept.",
+
+    # ── Algebra ──────────────────────────────────────────────────────────────
+    "Quadratic formula: for ax^2 + bx + c = 0, x = (-b +/- sqrt(b^2 - 4ac)) / (2a).",
+    "The discriminant b^2 - 4ac determines the nature of roots: positive for two real, zero for one repeated, negative for two complex.",
+    "Factoring difference of squares: a^2 - b^2 = (a + b)(a - b).",
+    "Perfect square trinomial: a^2 + 2ab + b^2 = (a + b)^2.",
+    "Sum and product of cubes: a^3 + b^3 = (a + b)(a^2 - ab + b^2); a^3 - b^3 = (a - b)(a^2 + ab + b^2).",
+    "FOIL method: (a + b)(c + d) = ac + ad + bc + bd.",
+    "Exponent rules: x^a * x^b = x^(a+b); x^a / x^b = x^(a-b); (x^a)^b = x^(ab); x^0 = 1 for x not equal to 0.",
+    "Logarithm rules: log(ab) = log(a) + log(b); log(a/b) = log(a) - log(b); log(a^n) = n * log(a).",
+    "Change of base: log_b(a) = log(a) / log(b).",
+    "A polynomial of degree n has at most n real roots.",
+    "Arithmetic sequence: each term differs by a constant d; nth term: a_n = a_1 + (n-1)*d. Sum: n/2 * (a_1 + a_n).",
+    "Geometric sequence: each term is multiplied by a constant ratio r; nth term: a_n = a_1 * r^(n-1). Sum of first n terms: a_1 * (1 - r^n) / (1 - r) for r != 1.",
+
+    # ── Number theory ────────────────────────────────────────────────────────
+    "A prime number is a natural number greater than 1 that has no positive divisors other than 1 and itself.",
+    "The Fundamental Theorem of Arithmetic: every integer greater than 1 can be uniquely factored into prime numbers.",
+    "The greatest common divisor (GCD) of two integers is the largest positive integer that divides both.",
+    "The least common multiple (LCM) of two integers is the smallest positive integer divisible by both. LCM(a,b) * GCD(a,b) = |a*b|.",
+    "Modular arithmetic: a ≡ b (mod n) means n divides a - b. Operations: (a + b) mod n = ((a mod n) + (b mod n)) mod n.",
+    "An integer is even if divisible by 2, odd otherwise. Sum/difference of two even or two odd numbers is even.",
+    "Divisibility rules: a number is divisible by 3 if the sum of its digits is divisible by 3; by 9 if the digit sum is divisible by 9; by 4 if its last two digits form a number divisible by 4.",
+
+    # ── Combinatorics ────────────────────────────────────────────────────────
+    "Permutation P(n, k) = n! / (n - k)!: the number of ways to arrange k items chosen from n, where order matters.",
+    "Combination C(n, k) = n! / (k! * (n - k)!): the number of ways to choose k items from n, where order does not matter.",
+    "Factorial: n! = n * (n-1) * (n-2) * ... * 1, with 0! = 1.",
+    "Multiplication principle: if there are m ways to do one task and n ways to do another, there are m * n ways to do both.",
+    "Binomial theorem: (a + b)^n = sum over k of C(n, k) * a^(n-k) * b^k.",
+    "The number of subsets of a set with n elements is 2^n.",
+
+    # ── Logic and sets ───────────────────────────────────────────────────────
+    "The contrapositive of 'if P then Q' is 'if not Q then not P'. A statement and its contrapositive are logically equivalent.",
+    "The converse of 'if P then Q' is 'if Q then P'. A statement and its converse are NOT logically equivalent in general.",
+    "De Morgan's laws: not(A and B) = (not A) or (not B); not(A or B) = (not A) and (not B).",
+    "Set union A ∪ B contains all elements in A or B; intersection A ∩ B contains elements in both.",
+    "|A ∪ B| = |A| + |B| - |A ∩ B| (inclusion-exclusion principle for two sets).",
+
+    # ── Functions ────────────────────────────────────────────────────────────
+    "A function maps each input to exactly one output.",
+    "The domain is the set of valid inputs; the range is the set of possible outputs.",
+    "A function is one-to-one (injective) if different inputs always produce different outputs.",
+    "An inverse function f^(-1) satisfies f^(-1)(f(x)) = x; the inverse exists if f is one-to-one.",
+    "Even functions satisfy f(-x) = f(x); odd functions satisfy f(-x) = -f(x).",
+]
+
+
+# ---------------------------------------------------------------------------
+# Corpus setup
+# ---------------------------------------------------------------------------
+def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
+    """Build corpus and FAISS index for the math RAG. Idempotent."""
+    global _maths_embedder, _maths_index, _maths_passages
+    if _maths_embedder is not None:
+        return
+
+    import faiss
+    from sentence_transformers import SentenceTransformer
+
+    print("[Maths RAG] Building corpus...")
+    passages = []
+
+    # Try several known Hendrycks MATH dataset paths
+    dataset_candidates = [
+        ("hendrycks/competition_math", None),
+        ("lighteval/MATH", "all"),
+        ("EleutherAI/hendrycks_math", None),
+    ]
+    loaded_dataset = False
     try:
-        result = eval(expr, {"__builtins__": {}}, safe_names)  # noqa: S307
-        return float(result)
-    except Exception:
-        return None
+        from datasets import load_dataset
+        for name, config in dataset_candidates:
+            try:
+                if config is not None:
+                    math_ds = load_dataset(name, config, split="train", trust_remote_code=True)
+                else:
+                    math_ds = load_dataset(name, split="train", trust_remote_code=True)
 
+                count_before = len(passages)
+                for item in math_ds:
+                    problem = (item.get("problem") or "").strip()
+                    solution = (item.get("solution") or "").strip()
 
-def _compute_inline(question: str) -> str:
-    """
-    Try to compute any numeric expression embedded in the question.
-    Returns a compact results string or '' if nothing computable.
-    """
-    results = []
-    q = _word_to_num(question)
+                    if problem and len(problem.split()) >= 3:
+                        passages.append(_clean_latex(problem))
 
-    for pct, total in re.findall(r"(\d+\.?\d*)\s*(?:%|percent)\s*of\s*(\d+\.?\d*)", q, re.I):
-        results.append(f"{pct}% of {total} = {float(pct)/100*float(total)}")
+                    if solution and len(solution.split()) >= 5:
+                        # Keep first 150 words of solution to bound passage length
+                        sol_excerpt = " ".join(solution.split()[:150])
+                        cleaned = _clean_latex(sol_excerpt)
+                        if cleaned and len(cleaned.split()) >= 5:
+                            passages.append(cleaned)
 
-    for n in re.findall(r"(?:sqrt\s*\(|square\s+root\s+of|√)\s*(\d+\.?\d*)\)?", q, re.I):
-        results.append(f"sqrt({n}) = {math.sqrt(float(n)):.6f}")
-
-    for base, exp in re.findall(
-        r"(\d+\.?\d*)\s*(?:\^|\*\*|to\s+the\s+power\s+of)\s*(\d+\.?\d*)", q, re.I
-    ):
-        results.append(f"{base}^{exp} = {float(base)**float(exp)}")
-
-    for n in re.findall(r"(\d+)\s*!", q):
-        results.append(f"{n}! = {math.factorial(int(n))}")
-
-    for n, r in re.findall(r"(\d+)\s*[Cc](?:hoose|r)?\s*(\d+)", q):
-        results.append(f"C({n},{r}) = {math.comb(int(n), int(r))}")
-
-    for expr in re.findall(r"(\d+\.?\d*(?:\s*[\+\-\*\/]\s*\d+\.?\d*)+)", q):
-        val = _eval_expr(expr.replace(" ", ""))
-        if val is not None:
-            results.append(f"{expr.strip()} = {val}")
-    
-    # Equilateral triangle area: A = (√3/4) × s²
-    for side in re.findall(r"equilateral\s+triangle.*?(?:side|sides?|edge).*?(\d+\.?\d*)", q, re.I):
-        area = (math.sqrt(3) / 4) * float(side) ** 2
-        results.append(f"Equilateral triangle area (s={side}): {area:.2f}")
-    
-    # Type I error with multiple independent tests: P = 1 - (1-α)^k
-    type_i_match = re.search(r"(\d+)\s*(?:independent\s+)?tests.*?α\s*=\s*(0\.\d+|[\d.]+)", q, re.I)
-    if type_i_match:
-        k = int(type_i_match.group(1))
-        alpha = float(type_i_match.group(2))
-        prob_reject_once = 1 - (1 - alpha) ** k
-        results.append(f"P(Type I error in ≥1 of {k} tests, α={alpha}): {prob_reject_once:.2f}")
-    
-    # Normal distribution: middle X% → use z-score for (100-X)/2 percentile
-    middle_pct_match = re.search(r"middle\s+(\d+)\s*(?:%|percent)", q, re.I)
-    if middle_pct_match and re.search(r"normal|distribution|standard", q, re.I):
-        middle = int(middle_pct_match.group(1))
-        tail_pct = (100 - middle) / 2
-        # Standard z-scores: 25th percentile ≈ -0.674, 75th percentile ≈ +0.674
-        z_critical = 0.674 if middle == 50 else None
-        if z_critical:
-            # Match "mean of X,XXX" (handle commas)
-            mean_match = re.search(r"mean\s+of\s+([\d,]+\.?\d*)", q, re.I)
-            # Match "standard deviation of X" (handle commas)
-            sigma_match = re.search(r"(?:standard\s+deviation|σ)\s+of\s+([\d,]+\.?\d*)", q, re.I)
-            if mean_match and sigma_match:
-                mean = float(mean_match.group(1).replace(",", ""))
-                sigma = float(sigma_match.group(1).replace(",", ""))
-                lower = mean - z_critical * sigma
-                upper = mean + z_critical * sigma
-                results.append(f"Middle {middle}% range: ({lower:.0f}, {upper:.0f})")
-
-    return "Computed: " + "; ".join(results) if results else ""
-
-
-# ------------------------------------------------------------------ #
-# Keyword / relevance helpers                                          #
-# ------------------------------------------------------------------ #
-
-def _extract_math_keywords(text: str) -> list[str]:
-    keywords = []
-    
-    # Extract Greek letters and replace with their names
-    for symbol, name in _GREEK_LETTERS.items():
-        if symbol in text:
-            keywords.append(name)
-    
-    # Extract mathematical symbols and their meanings
-    for symbol, meaning in _MATH_SYMBOLS.items():
-        if symbol in text:
-            # Add the meaning words (e.g., "integral" from "∫")
-            for word in meaning.split():
-                keywords.append(word)
-    
-    # Extract standard words (5+ chars, not stopwords)
-    for w in re.findall(r'\b[a-z]{5,}\b', text.lower()):
-        if w not in _MATH_STOP_WORDS:
-            keywords.append(w)
-    
-    # Extract acronyms (uppercase sequences)
-    for w in re.findall(r'\b[A-Z]{2,}\b', text):
-        keywords.append(w.lower())
-    
-    # Extract decimal numbers
-    for w in re.findall(r'\b\d+\.\d+\b', text):
-        keywords.append(w)
-    
-    # Extract known math functions (case-insensitive)
-    text_lower = text.lower()
-    for func in _MATH_FUNCTIONS:
-        if func in text_lower:
-            keywords.append(func)
-    
-    # Remove duplicates while preserving order
-    return list(dict.fromkeys(keywords))
-
-
-def _is_math_relevant(snippet: str, question: str) -> bool:
-    keywords = _extract_math_keywords(question)
-    if not keywords:
-        return True
-    snippet_lower = snippet.lower()
-    for kw in keywords:
-        if re.match(r'^\d+\.\d+$', kw) and kw in snippet:
-            return True
-    matches = sum(1 for kw in keywords if kw in snippet_lower)
-    return matches >= 2
-
-
-# ------------------------------------------------------------------ #
-# Wikipedia retrieval                                                  #
-# ------------------------------------------------------------------ #
-
-def _clean_wiki_text(text: str) -> str:
-    text = _CITATION_RE.sub("", text)
-    return re.sub(r'\s{2,}', ' ', text).strip()
-
-
-def _wiki_math(query: str) -> str:
-    """
-    Fetch Wikipedia summary + Formula/Definition section.
-    Returns at most 1200 characters of clean text.
-    """
-    try:
-        import wikipedia
-        wikipedia.set_lang("en")
-        try:
-            page = wikipedia.page(query, auto_suggest=False)
-            summary = wikipedia.summary(query, sentences=3, auto_suggest=False)
-            summary = _clean_wiki_text(summary)
-
-            formula_lines: list[str] = []
-            in_useful = False
-            for line in page.content.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                header_m = re.match(r'^==+\s*(.+?)\s*==+$', line)
-                if header_m:
-                    in_useful = bool(_USEFUL_SECTIONS_RE.match(header_m.group(1)))
-                    continue
-                if in_useful and len(line) > 30:
-                    formula_lines.append(_clean_wiki_text(line))
-                if len(formula_lines) >= 3:
-                    break
-
-            combined = summary
-            if formula_lines:
-                combined += "\n\n" + "\n".join(formula_lines)
-            return combined[:1200]
-
-        except wikipedia.exceptions.DisambiguationError as e:
-            result = wikipedia.summary(e.options[0], sentences=3, auto_suggest=False)
-            return _clean_wiki_text(result)[:1200]
-        except wikipedia.exceptions.PageError:
-            return ""
-    except Exception:
-        return ""
-
-
-def _wiki_is_useful(text: str) -> bool:
-    if not text or len(text.strip()) < 100:
-        return False
-    if "may refer to:" in text.lower():
-        return False
-    return True
-
-
-# ------------------------------------------------------------------ #
-# Strategy parsing                                                     #
-# ------------------------------------------------------------------ #
-
-def _parse_strategy(raw: str) -> tuple[str, str, str]:
-    """Returns (action, query, category). action is 'SKIP' or 'QUERY'."""
-    raw = raw.strip()
-    if re.match(r'^SKIP', raw, re.I):
-        return "SKIP", "", ""
-
-    query = ""
-    category = "General"
-    qry_m = re.search(r'QUERY\s*:\s*(.+?)(?:\s*\|\s*CATEGORY|\Z)', raw, re.I)
-    cat_m = re.search(r'CATEGORY\s*:\s*(\w+)', raw, re.I)
-    if qry_m:
-        query = qry_m.group(1).strip().strip('"').strip("'")
-    if cat_m:
-        category = cat_m.group(1).strip()
-    return "QUERY", query, category
-
-
-def _extract_concept(question: str, category: str) -> str:
-    """
-    Extract key concepts from question for better searching.
-    Replaces narrative details with conceptual keywords.
-    """
-    q_lower = question.lower()
-    
-    # Pattern-based concept extraction (ordered by specificity)
-    concept_map = {
-        # Statistics & Probability (specific patterns first)
-        r"\bt.test\b": "two-sample t-test",
-        r"\bz.test\b": "two-sample z-test",
-        r"expected\s+(?:value|amount)": "expected value probability",
-        r"type\s+i\s+error": "type I error probability independent tests",
-        r"survey.*(?:non-response|nonresponse|didn't respond|did not respond)": "survey methodology non-response bias",
-        r"(?:comparing|compare).*mean": "two-sample statistical test",
-        r"mean.*(?:salary|income|payment)": "statistical hypothesis test population mean",
-        r"(?:normal|distribution).*middle\s+(\d+)": "normal distribution quartile percentile",
-        
-        # Geometry
-        r"equilateral\s+triangle": "equilateral triangle geometry area",
-        r"(?:matrix|matrices).*dimension": "linear algebra matrix multiplication dimension",
-        
-        # Probability
-        r"(?:independent|mutually exclusive).*(?:event|probability)": "probability independent events",
-        r"(?:bin|urn|ball|draw|draws).*(?:random|probability)": "probability conditional expectation",
-    }
-    
-    for pattern, concept in concept_map.items():
-        if re.search(pattern, q_lower, re.I):
-            return concept
-    
-    # Fallback: extract key math terms
-    keywords = _extract_math_keywords(question)
-    if keywords:
-        # Filter to meaningful terms
-        meaningful = [kw for kw in keywords if len(kw) > 3 and kw not in _MATH_STOP_WORDS]
-        if meaningful:
-            return " ".join(meaningful[:4])  # Top 4 keywords
-    
-    return question[:60]  # Fallback to original
-
-
-def _get_strategy(question: str, options: list, generate_answer_fn) -> tuple[str, str, str]:
-    opts_str = ", ".join(f'"{t}"' for t in options) if options else "—"
-    user_msg = f"Q: {question}\nOptions: [{opts_str}]"
-    try:
-        raw = generate_answer_fn(_MATH_STRATEGY_SYSTEM, user_msg, max_new_tokens=25)
-        print(f"  [RAG-Maths] Strategy raw: {raw[:100]!r}")
-        action, query, category = _parse_strategy(raw)
-        print(f"  [RAG-Maths] Action={action}, Query={query!r}, Category={category}")
-        return action, query, category
+                added = len(passages) - count_before
+                print(f"      Loaded {name}: +{added:,} passages")
+                loaded_dataset = True
+                break  # success — stop trying other paths
+            except Exception as inner_e:
+                print(f"      [Maths RAG] Could not load {name}: {type(inner_e).__name__}")
+                continue
     except Exception as e:
-        print(f"  [RAG-Maths] Strategy call failed: {e}")
-        # Fallback to concept extraction
-        concept = _extract_concept(question, "General")
-        return "QUERY", concept, "General"
+        print(f"  [Maths RAG] Warning: datasets library issue: {e}")
+
+    if not loaded_dataset:
+        print("      [Maths RAG] No external dataset loaded; using curated facts only.")
+
+    # Always include curated facts (they cover essential formulas)
+    passages.extend(_CURATED_MATH_FACTS)
+
+    # Deduplicate while preserving order
+    seen, unique = set(), []
+    for p in passages:
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            unique.append(p)
+    _maths_passages = unique
+
+    if not _maths_passages:
+        raise RuntimeError("Maths RAG corpus is empty after loading!")
+
+    print(f"      {len(_maths_passages):,} passages total")
+
+    print(f"[Maths RAG] Embedding with {embed_model} ...")
+    _maths_embedder = SentenceTransformer(embed_model, device="cuda")
+    emb = _maths_embedder.encode(
+        _maths_passages,
+        batch_size=32,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    ).astype("float32")
+    _maths_index = faiss.IndexFlatIP(emb.shape[1])
+    _maths_index.add(emb)
 
 
-# ------------------------------------------------------------------ #
-# Main entry point                                                     #
-# ------------------------------------------------------------------ #
+def maths_retrieve(query: str, k: int = MATHS_TOP_K) -> list:
+    """Retrieve top-k passages for the math query."""
+    global _maths_embedder, _maths_index, _maths_passages
+    if _maths_embedder is None:
+        raise RuntimeError("Maths RAG is not initialized. Call setup_maths_rag() first.")
+    q = _maths_embedder.encode(
+        [query], normalize_embeddings=True, convert_to_numpy=True
+    ).astype("float32")
+    _, idx = _maths_index.search(q, k)
+    return [_maths_passages[i] for i in idx[0]]
 
-def rag_maths(question_text: str, option_texts: list = None,
-              generate_answer_fn=None) -> str:
-    """
-    Mathematics RAG: Computation + Formula Cache + Model Intelligence.
-    
-    Strategy:
-    1. Try inline computation (100% accurate for numeric problems)
-    2. Try formula cache with concept extraction (high-confidence only)
-    3. Return empty context (let model use its knowledge)
-    
-    Web lookup (Wikipedia/DDG) disabled for math - adds noise without value.
-    """
-    if option_texts is None:
-        option_texts = []
 
-    clean_q = _ARTICLE_REF_RE.sub("", question_text).strip(" ,;")
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+def rag_maths(query: str, option_texts: Optional[list] = None) -> str:
 
-    # ------------------------------------------------------------------ #
-    # Stage 1: Inline Computation                                         #
-    # ------------------------------------------------------------------ #
-    computed = _compute_inline(clean_q)
-    if computed:
-        print(f"  [RAG-Maths] Inline computation result: {computed[:80]}")
-        return computed
+    if query is None:
+        return ""
+    stem = query.strip()
+    if stem.upper().startswith("Q:"):
+        stem = stem[2:].strip()
 
-    # ------------------------------------------------------------------ #
-    # Stage 2: Formula Cache Lookup (Concept-Based)                       #
-    # ------------------------------------------------------------------ #
-    # Extract concept FIRST - this is critical to avoid false matches
-    concept_query = _extract_concept(clean_q, "General")
-    print(f"  [RAG-Maths] Formula cache search: {concept_query!r}")
-    
-    cache_result = search_formula(concept_query)
-    if cache_result:
-        cache_text = format_formula_context(cache_result)
-        print(f"  [RAG-Maths] Cache hit: {cache_result.get('formula', '')[:50]}...")
-        return cache_text
+    # Build the retrieval query. Options are short for math (often just
+    # numbers), so they add little signal; the stem dominates.
+    if option_texts:
+        options_str = " ".join(str(o).strip() for o in option_texts if o)
+        retrieval_query = f"{stem} {options_str}".strip()
+    else:
+        retrieval_query = stem
 
-    # ------------------------------------------------------------------ #
-    # Stage 3: Model Intelligence (No Web Lookup)                         #
-    # ------------------------------------------------------------------ #
-    print(f"  [RAG-Maths] No computation/cache match. Using model knowledge.")
-    return ""
+    contexts = maths_retrieve(retrieval_query, k=MATHS_TOP_K)
+    return "\n\n".join(contexts)

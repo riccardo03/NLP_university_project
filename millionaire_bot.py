@@ -32,10 +32,10 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    30,
-    COMP_HISTORY_POLITICS: 30,
-    COMP_SCIENCE_NATURE:   30,
-    COMP_MATHS:            30,
+    COMP_ENTERTAINMENT:    40,
+    COMP_HISTORY_POLITICS: 40,
+    COMP_SCIENCE_NATURE:   40,
+    COMP_MATHS:            40,
 }
 
 
@@ -75,8 +75,14 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
 
+    try:
+        import rag_maths
+        rag_maths.setup_maths_rag()
+    except Exception as e:
+        print(f"Warning: maths RAG setup failed: {e}")
 
-def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 30, **kwargs) -> str:
+
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
     if _pipe is None:
         raise RuntimeError("You must call load_model() first.")
 
@@ -213,7 +219,7 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     elif comp_id == COMP_SCIENCE_NATURE:
         return rag_science(question_text, option_texts or [])
     elif comp_id == COMP_MATHS:
-        return rag_maths(question_text)
+        return rag_maths(question_text, option_texts or [])
     return ""
 
 
