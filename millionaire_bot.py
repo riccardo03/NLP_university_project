@@ -166,9 +166,7 @@ SYSTEM_PROMPTS = {
     ),
 
     COMP_MATHS: (
-        "You are a careful math tutor. Use the provided context to answer "
-        "multiple-choice math questions. Reason briefly (2-4 sentences), "
-        "then end with EXACTLY one line: 'Answer: [N]' where N is 0, 1, 2, or 3."
+        "You are a math expert. Given the context and options, output ONLY 'Answer: [N]' where N is 0, 1, 2, or 3. No explanation."
     ),
 }
 
