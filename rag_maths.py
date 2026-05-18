@@ -70,11 +70,10 @@ def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
     print("[Maths RAG] Building corpus...")
     passages = []
 
-    # Try several known Hendrycks MATH dataset paths
     dataset_candidates = [
-        ("hendrycks/competition_math", None),
-        ("lighteval/MATH", "all"),
-        ("EleutherAI/hendrycks_math", None),
+        ("AI-MO/NuminaMath-CoT", None),
+        ("openai/gsm8k", "main"),
+        ("HuggingFaceH4/MATH-500", None),
     ]
     loaded_dataset = False
     try:
@@ -82,20 +81,19 @@ def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
         for name, config in dataset_candidates:
             try:
                 if config is not None:
-                    math_ds = load_dataset(name, config, split="train", trust_remote_code=True)
+                    math_ds = load_dataset(name, config, split="train")
                 else:
-                    math_ds = load_dataset(name, split="train", trust_remote_code=True)
+                    math_ds = load_dataset(name, split="train")
 
                 count_before = len(passages)
                 for item in math_ds:
-                    problem = (item.get("problem") or "").strip()
-                    solution = (item.get("solution") or "").strip()
+                    problem = (item.get("problem") or item.get("question") or item.get("query") or "").strip()
+                    solution = (item.get("solution") or item.get("answer") or item.get("response") or "").strip()
 
                     if problem and len(problem.split()) >= 3:
                         passages.append(_clean_latex(problem))
 
                     if solution and len(solution.split()) >= 5:
-                        # Keep first 150 words of solution to bound passage length
                         sol_excerpt = " ".join(solution.split()[:150])
                         cleaned = _clean_latex(sol_excerpt)
                         if cleaned and len(cleaned.split()) >= 5:
@@ -104,9 +102,9 @@ def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
                 added = len(passages) - count_before
                 print(f"      Loaded {name}: +{added:,} passages")
                 loaded_dataset = True
-                break  # success — stop trying other paths
+                break
             except Exception as inner_e:
-                print(f"      [Maths RAG] Could not load {name}: {type(inner_e).__name__}")
+                print(f"      [Maths RAG] Could not load {name}: {type(inner_e).__name__}: {inner_e}")
                 continue
     except Exception as e:
         print(f"  [Maths RAG] Warning: datasets library issue: {e}")
