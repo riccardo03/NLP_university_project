@@ -1,6 +1,6 @@
 """
     Corpus    : Hendrycks MATH dataset + curated math facts and formulas
-    Embedder  : BAAI/bge-small-en-v1.5         (~500 MB VRAM)
+    Embedder  : allenai/specter
     Vector DB : FAISS IndexFlatIP (cosine via normalised vectors)
 """
 
@@ -16,7 +16,7 @@ _maths_embedder = None
 _maths_index = None
 _maths_passages = None
 
-MATHS_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+MATHS_EMBED_MODEL = "allenai/specter"
 MATHS_TOP_K = 5
 
 
@@ -273,7 +273,9 @@ def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
         normalize_embeddings=True,
         convert_to_numpy=True,
     ).astype("float32")
-    _maths_index = faiss.IndexFlatIP(emb.shape[1])
+    embed_dim = emb.shape[1]
+    print(f"[Maths RAG] Embedding dimension: {embed_dim}")
+    _maths_index = faiss.IndexFlatIP(embed_dim)
     _maths_index.add(emb)
 
 
