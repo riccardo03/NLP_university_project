@@ -18,6 +18,7 @@ _maths_passages = None
 
 MATHS_EMBED_MODEL = "allenai/specter"
 MATHS_TOP_K = 5
+MATHS_MAX_PASSAGES = 80000
 
 
 # ---------------------------------------------------------------------------
@@ -92,12 +93,16 @@ def setup_maths_rag(embed_model: str = MATHS_EMBED_MODEL) -> None:
 
                     if problem and len(problem.split()) >= 3:
                         passages.append(_clean_latex(problem))
+                    if len(passages) >= MATHS_MAX_PASSAGES:
+                        break
 
                     if solution and len(solution.split()) >= 5:
                         sol_excerpt = " ".join(solution.split()[:150])
                         cleaned = _clean_latex(sol_excerpt)
                         if cleaned and len(cleaned.split()) >= 5:
                             passages.append(cleaned)
+                    if len(passages) >= MATHS_MAX_PASSAGES:
+                        break
 
                 added = len(passages) - count_before
                 print(f"      Loaded {name}: +{added:,} passages")
