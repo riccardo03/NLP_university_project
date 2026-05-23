@@ -1,50 +1,66 @@
 """
-    Corpus    : SciQ supporting paragraphs + OpenBookQA core facts (~18k passages)
-    Embedder  : BAAI/bge-small-en-v1.5         (~500 MB VRAM)
-    Vector DB : FAISS IndexFlatIP (cosine via normalised vectors)
-    Generator : Qwen/Qwen2.5-7B-Instruct, 4-bit NF4 via bitsandbytes (~6 GB VRAM)
+Science RAG pipeline.
+
+Corpus    : SciQ + OpenBookQA + MMLU science subsets
+Embedder  : BAAI/bge-small-en-v1.5
+Vector DB : FAISS IndexFlatIP (cosine via normalised vectors)
+Retrieval : Multi-query FAISS → BM25 hybrid rerank (RRF)
 """
 
+import os
 import re
 from typing import Optional
-import os
+
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-# Science RAG resources (corpus, embedder, and retrieval)
-# ---------------------------------------------------------------------------
 _science_embedder = None
-_science_index = None
+_science_index    = None
 _science_passages = None
+_bm25_index       = None
 
 SCIENCE_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-SCIENCE_TOP_K = 5
+SCIENCE_TOP_K       = 5
+RRF_K               = 60
+
+MMLU_SCIENCE_SUBSETS = [
+    "high_school_biology", "high_school_chemistry", "high_school_physics",
+    "college_biology",     "college_chemistry",     "college_physics",
+    "astronomy", "anatomy", "nutrition", "virology", "medical_genetics",
+    "environmental_science", "conceptual_physics",
+]
 
 
 def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
-    """Build corpus and FAISS index for the science RAG. Idempotent."""
-    global _science_embedder, _science_index, _science_passages
+    """Build corpus, BM25 index, and FAISS index. Idempotent."""
+    global _science_embedder, _science_index, _science_passages, _bm25_index
     if _science_embedder is not None:
         return
 
     import faiss
-    from sentence_transformers import SentenceTransformer
     from datasets import load_dataset
+    from rank_bm25 import BM25Okapi
+    from sentence_transformers import SentenceTransformer
 
     print("[Science RAG] Building corpus...")
     passages = []
 
-    sciq = load_dataset("allenai/sciq", split="train")
-    for item in sciq:
+    for item in load_dataset("allenai/sciq", split="train"):
         s = (item.get("support") or "").strip()
         if s and len(s.split()) >= 5:
             passages.append(s)
 
     for split in ("train", "validation", "test"):
-        obqa = load_dataset("allenai/openbookqa", "additional", split=split)
-        for item in obqa:
+        for item in load_dataset("allenai/openbookqa", "additional", split=split):
             f = (item.get("fact1") or "").strip()
             if f:
                 passages.append(f)
+
+    for subject in MMLU_SCIENCE_SUBSETS:
+        try:
+            for item in load_dataset("cais/mmlu", subject, split="test"):
+                passages.append(f"{item['question']} {item['choices'][item['answer']]}.")
+        except Exception as e:
+            print(f"  [Science RAG] Skipping mmlu/{subject}: {e}")
 
     seen, unique = set(), []
     for p in passages:
@@ -52,7 +68,9 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
             seen.add(p)
             unique.append(p)
     _science_passages = unique
-    print(f"      {_science_passages and len(_science_passages) or 0:,} passages")
+    print(f"  {len(_science_passages):,} passages")
+
+    _bm25_index = BM25Okapi([p.lower().split() for p in _science_passages])
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
     _science_embedder = SentenceTransformer(embed_model, device="cuda")
@@ -68,55 +86,81 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
 
 
 def science_retrieve(query: str, k: int = SCIENCE_TOP_K) -> list:
-    """Retrieve top-k passages for the science query.
-
-    This function assumes that setup_science_rag() was run externally,
-    for example from millionaire_bot.load_model().
-    """
-    global _science_embedder, _science_index, _science_passages
     if _science_embedder is None:
-        raise RuntimeError("Science RAG is not initialized. Call setup_science_rag() first.")
-    print(f"  [RAG-Sci] FAISS search | query: {query[:80]!r} | k={k}")
-    q = _science_embedder.encode([query], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
-    distances, idx = _science_index.search(q, k)
-    results = [_science_passages[i] for i in idx[0]]
-    print(f"  [RAG-Sci] Top-{k} scores: {[round(float(d), 3) for d in distances[0]]}")
-    for rank, (passage, score) in enumerate(zip(results, distances[0])):
-        print(f"    [{rank}] score={score:.3f} | {passage[:100]}…")
-    return results
+        raise RuntimeError("Science RAG is not initialised. Call setup_science_rag() first.")
+    q = _science_embedder.encode(
+        [query], normalize_embeddings=True, convert_to_numpy=True
+    ).astype("float32")
+    _, idx = _science_index.search(q, k)
+    return [_science_passages[i] for i in idx[0]]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 _QUESTION_RE = re.compile(
-    r"^(?:Q:\s*)?(.*?)\s*\[0\]\s*(.*?)\s*\[1\]\s*(.*?)"
-    r"\s*\[2\]\s*(.*?)\s*\[3\]\s*(.*?)\s*$",
+    r"^(?:Q:\s*)?(.*?)\s*\[0\]\s*(.*?)\s*\[1\]\s*(.*?)\s*\[2\]\s*(.*?)\s*\[3\]\s*(.*?)\s*$",
     re.DOTALL,
 )
+
 
 def _parse_question(text: str):
     m = _QUESTION_RE.match(text.strip())
     if not m:
         return None, None
-    stem = m.group(1).strip().rstrip(".").strip()
+    stem = m.group(1).strip().rstrip(".")
     options = [m.group(i).strip().rstrip(".") for i in range(2, 6)]
     return stem, options
 
 
-def _retrieve(query: str, k: int = None):
-    return science_retrieve(query, k=k if k is not None else SCIENCE_TOP_K)
+def multi_query_retrieve(stem: str, options: list, k_stem: int = 3, k_opt: int = 1) -> list:
+    seen, results = set(), []
+    for p in science_retrieve(stem, k=k_stem):
+        if p not in seen:
+            seen.add(p)
+            results.append(p)
+    for opt in options:
+        for p in science_retrieve(f"{stem} {opt}", k=k_opt):
+            if p not in seen:
+                seen.add(p)
+                results.append(p)
+    return results
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+def hybrid_retrieve(query: str, passages: list, k: int = 5, alpha: float = 0.6) -> list:
+    if not passages:
+        return passages
+
+    import faiss
+
+    embs = _science_embedder.encode(
+        passages, normalize_embeddings=True, convert_to_numpy=True
+    ).astype("float32")
+    tmp_index = faiss.IndexFlatIP(embs.shape[1])
+    tmp_index.add(embs)
+    q_emb = _science_embedder.encode(
+        [query], normalize_embeddings=True, convert_to_numpy=True
+    ).astype("float32")
+    _, dense_idx = tmp_index.search(q_emb, len(passages))
+    dense_ranks = {passages[i]: rank for rank, i in enumerate(dense_idx[0])}
+
+    all_bm25 = _bm25_index.get_scores(query.lower().split())
+    p_to_idx = {p: i for i, p in enumerate(_science_passages)}
+    sparse_ranks = {
+        p: rank
+        for rank, p in enumerate(
+            sorted(passages, key=lambda p: all_bm25[p_to_idx[p]], reverse=True)
+        )
+    }
+
+    def rrf(rank: int) -> float:
+        return 1.0 / (RRF_K + rank + 1)
+
+    scores = {
+        p: alpha * rrf(dense_ranks[p]) + (1 - alpha) * rrf(sparse_ranks[p])
+        for p in passages
+    }
+    return sorted(passages, key=lambda p: scores[p], reverse=True)[:k]
+
+
 def rag_science(query: str, option_texts: Optional[list] = None) -> str:
-    # RAG setup is performed externally (e.g. by millionaire_bot.load_model()).
-    # This keeps rag_science fast during import and allows setup to run
-    # only when the environment and model are ready.
-
-    # ---- Resolve stem and options ---------------------------------------
     if option_texts is not None:
         if len(option_texts) != 4:
             raise ValueError(f"Expected 4 options, got {len(option_texts)}.")
@@ -124,25 +168,13 @@ def rag_science(query: str, option_texts: Optional[list] = None) -> str:
         if stem.upper().startswith("Q:"):
             stem = stem[2:].strip()
         options = [str(o).strip().rstrip(".") for o in option_texts]
-        print(f"  [RAG-Sci] stem (from arg): {stem!r}")
     else:
         stem, options = _parse_question(query)
         if stem is None:
             raise ValueError(
-                "Could not parse [0]/[1]/[2]/[3] options from query, "
-                "and no option_texts argument was provided."
+                "Could not parse [0]/[1]/[2]/[3] options from query. "
+                "Pass option_texts explicitly."
             )
-        print(f"  [RAG-Sci] stem (parsed): {stem!r}")
 
-    print(f"  [RAG-Sci] options: {options}")
-
-    # ---- Retrieve (delegated) -------------------------------------------
-    # Including options in the query covers the answer space, not just the stem.
-    retrieval_query = stem + " " + " ".join(options)
-    print(f"  [RAG-Sci] retrieval query: {retrieval_query[:120]!r}")
-    contexts = _retrieve(retrieval_query, k=None)
-    print(f"  [RAG-Sci] retrieved {len(contexts)} passages, total chars: {sum(len(c) for c in contexts)}")
-
-    return "\n\n".join(contexts)
-
-
+    candidates = multi_query_retrieve(stem, options)
+    return "\n\n".join(hybrid_retrieve(stem, candidates, k=5, alpha=0.6))
