@@ -153,10 +153,12 @@ SYSTEM_PROMPTS = {
 ),
 
     COMP_HISTORY_POLITICS: (
-        "You are a history and politics expert. "
-        "Given context (if any), a question, and four numbered options, "
-        "the VERY FIRST LINE of your response must be exactly: ANSWER: <digit> (where digit is 0, 1, 2, or 3). "
-        "Then provide a 1-sentence explanation of why that answer is correct."
+        "You are a history and politics expert answering a multiple choice question. "
+        "ALWAYS prioritize the provided context over your own knowledge. "
+        "If the context contains the answer, use it — do not override it with general reasoning. "
+        "For questions asking about 'primary', 'main', or 'direct' cause/reason, choose the most proximate cause, not the most famous one. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why, referencing the context."
     ),
 
     COMP_SCIENCE_NATURE: (
