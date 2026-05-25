@@ -52,11 +52,6 @@ _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
 _NOT_EXCEPT_RE    = re.compile(r'\b(NOT|EXCEPT|least|never|false|incorrect|wrong)\b', re.IGNORECASE)
-_BIO_KEYWORDS_RE  = re.compile(
-    r"\b(father|mother|parent|sibling|brother|sister|wife|husband|"
-    r"relation|relationship|childhood|born|raised|family|married|"
-    r"early life|upbringing|ancestry)\b", re.IGNORECASE,
-)
 
 # Tokens carrying negation; contracted forms like "didn't" → ["didn","t"] are excluded.
 _NEGATION_TOKENS: frozenset[str] = frozenset({
@@ -77,6 +72,8 @@ class WeightedQuery:
 
 def setup_entertainment_rag() -> None:
     global _gliner_model
+    _wiki_lookup.cache_clear()  
+    _ddg_lookup.cache_clear()   
     print("  [RAG-Entertainment] Loading GLiNER model...")
     try:
         from gliner import GLiNER
@@ -270,55 +267,20 @@ def _snippet_polarity(snippet: str, option: str) -> float:
     return 1.0
 
 
-def _extract_bio_keywords(question: str) -> str:
-    parts = list(dict.fromkeys(_BIO_KEYWORDS_RE.findall(question) + _PROPER_MULTI_RE.findall(question)))
-    return " ".join(parts[:4])
-
-
-def _detect_question_type(question: str) -> str:
-    return "biography" if _BIO_KEYWORDS_RE.search(question) else "factual"
-
-
 def _build_queries(
-    question: str,
     option_texts: list[str],
-    labeled: list[tuple[str, str]],
     option_entities: list[str],
-    subj_str: str,
     main_term: str,
-    question_type: str,
 ) -> list[WeightedQuery]:
-    queries:     list[WeightedQuery] = []
-    clean_q      = _clean_query_text(question)
-    all_entities = " ".join(t for t, _ in labeled[:3])
-
-    queries.append(WeightedQuery(f"{main_term} {clean_q}"[:120], 1.2, "entity_question"))
-    if all_entities and all_entities != main_term:
-        queries.append(WeightedQuery(all_entities[:120], 1.0, "all_entities"))
-
-    if question_type == "biography":
-        bio_kws = _extract_bio_keywords(question)
-        if bio_kws:
-            queries.append(WeightedQuery(f"{main_term} {bio_kws}"[:120], 1.4, "biography_keywords"))
-        secondary = [t for t, _ in labeled if t != main_term]
-        if secondary:
-            queries.append(WeightedQuery(f"{secondary[0]} {main_term}"[:120], 1.3, "secondary_entity"))
-
-    # Per-option: GLiNER entity from each option → targeted DDG query for that option only.
-    # Options with no extractable entity (e.g. "Indifferent and distant") are skipped.
+    queries: list[WeightedQuery] = []
     for idx, opt in enumerate(option_texts):
         ent = option_entities[idx] if idx < len(option_entities) else ""
         if ent:
-            queries.append(WeightedQuery(
-                f"{main_term} {ent}"[:120],
-                1.1 if question_type == "biography" else 1.0,
-                f"entity_option_{idx}",
-            ))
-        elif question_type == "factual" and idx < 2:
+            queries.append(WeightedQuery(f"{main_term} {ent}"[:120], 1.0, f"entity_option_{idx}"))
+        else:
             opt_clean = _clean_query_text(opt)
             if opt_clean:
                 queries.append(WeightedQuery(f"{main_term} {opt_clean}"[:120], 0.8, f"text_option_{idx}"))
-
     return queries
 
 
@@ -421,13 +383,10 @@ def rag_entertainment(
         return "\n\n".join(filter(None, [wiki, *ddg]))[:1500]
 
     n_opts          = min(len(option_texts), 4)
-    question_type   = _detect_question_type(query)
     option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
     print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
-    queries = _build_queries(
-        query, list(option_texts[:n_opts]), labeled, option_entities, subj_str, main_term, question_type
-    )
-    print(f"  [ENT] question_type={question_type!r}  queries={[(q.strategy, q.text) for q in queries]}")
+    queries = _build_queries(list(option_texts[:n_opts]), option_entities, main_term)
+    print(f"  [ENT] queries={[(q.strategy, q.text) for q in queries]}")
 
     def _safe(fut, default):
         try:   return fut.result(timeout=_TIMEOUT + 1)
@@ -451,10 +410,11 @@ def rag_entertainment(
     global_snips = tuple(global_snips_list)
     print(f"  [ENT] wiki chars={len(wiki_text)}  global_snips={len(global_snips)}")
 
-    has_title_entity = any(label in _TITLE_LABELS for _, label in labeled)
-    if not has_title_entity and not wiki_text:
+    has_any_entity = bool(labeled)
+    has_any_snips  = len(global_snips) >= 2
+    if not has_any_entity and not wiki_text and not has_any_snips:
         print("  [ENT] Low confidence -> LLM fallback")
-        return ""
+    return ""
 
     votes          = _vote(list(option_texts[:n_opts]), global_snips, subj_str, query)
     is_negative    = bool(_NOT_EXCEPT_RE.search(query))
