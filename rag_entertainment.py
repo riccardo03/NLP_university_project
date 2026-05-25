@@ -23,8 +23,7 @@ _DOMAIN_TERMS: frozenset[str] = frozenset({
     "film", "movie", "song", "show", "album", "band", "role",
     "character", "single", "track", "series", "actor", "actress", "director",
 })
-_STOP_WORDS:       frozenset[str] = _STOP_WORDS_BASE | _DOMAIN_TERMS
-_STOP_WORDS_QUERY: frozenset[str] = _STOP_WORDS_BASE
+_STOP_WORDS: frozenset[str] = _STOP_WORDS_BASE | _DOMAIN_TERMS
 
 _GLINER_MODEL_NAME = "urchade/gliner_medium-v2.1"
 _GLINER_LABELS = [
@@ -90,10 +89,6 @@ def _tokenize(text: str) -> list[str]:
 def _keywords(text: str) -> set[str]:
     return {t for t in _tokenize(text) if len(t) >= 3 and t not in _STOP_WORDS}
 
-
-def _clean_query_text(text: str) -> str:
-    kept = [w for w in text.split() if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS_QUERY]
-    return " ".join(kept) if kept else text
 
 
 def _extract_subjects_regex(question: str) -> list[str]:
@@ -267,20 +262,49 @@ def _snippet_polarity(snippet: str, option: str) -> float:
     return 1.0
 
 
+def _extract_question_keywords(question: str, main_term: str) -> str:
+    parts: list[str] = []
+    seen:  set[str]  = set()
+    main_lower = main_term.lower()
+
+    # Years (always useful context regardless of main_term)
+    for m in re.finditer(r'\b((?:19|20)\d{2}s?)\b', question):
+        y = m.group(1)
+        if y not in seen:
+            seen.add(y); parts.append(y)
+
+    # Quoted terms not already covered by main_term
+    for term in _QUOTED_RE.findall(question):
+        tl = term.strip().lower()
+        if tl and tl not in seen and tl not in main_lower and main_lower not in tl:
+            seen.add(tl); parts.append(term.strip())
+
+    # Multi-word proper nouns not already covered by main_term
+    for m in _PROPER_MULTI_RE.findall(question):
+        ml = m.lower()
+        if ml not in seen and ml not in main_lower and main_lower not in ml:
+            seen.add(ml); parts.append(m)
+
+    return " ".join(parts)
+
+
 def _build_queries(
+    question: str,
     option_texts: list[str],
     option_entities: list[str],
     main_term: str,
 ) -> list[WeightedQuery]:
     queries: list[WeightedQuery] = []
+    q_kws = _extract_question_keywords(question, main_term)
     for idx, opt in enumerate(option_texts):
         ent = option_entities[idx] if idx < len(option_entities) else ""
         if ent:
-            queries.append(WeightedQuery(f"{main_term} {ent}"[:120], 1.0, f"entity_option_{idx}"))
+            opt_part = ent
         else:
-            opt_clean = _clean_query_text(opt)
-            if opt_clean:
-                queries.append(WeightedQuery(f"{main_term} {opt_clean}"[:120], 0.8, f"text_option_{idx}"))
+            kws      = [w for w in _tokenize(opt) if len(w) >= 3 and w not in _STOP_WORDS]
+            opt_part = " ".join(kws[:3])
+        text = f"{main_term} {q_kws} {opt_part}".strip()[:120]
+        queries.append(WeightedQuery(text, 1.0, f"option_{idx}"))
     return queries
 
 
@@ -385,7 +409,7 @@ def rag_entertainment(
     n_opts          = min(len(option_texts), 4)
     option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
     print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
-    queries = _build_queries(list(option_texts[:n_opts]), option_entities, main_term)
+    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term)
     print(f"  [ENT] queries={[(q.strategy, q.text) for q in queries]}")
 
     def _safe(fut, default):
@@ -414,7 +438,7 @@ def rag_entertainment(
     has_any_snips  = len(global_snips) >= 2
     if not has_any_entity and not wiki_text and not has_any_snips:
         print("  [ENT] Low confidence -> LLM fallback")
-    return ""
+        return ""
 
     votes          = _vote(list(option_texts[:n_opts]), global_snips, subj_str, query)
     is_negative    = bool(_NOT_EXCEPT_RE.search(query))
