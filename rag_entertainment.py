@@ -140,16 +140,16 @@ def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
 
 
 def _extract_option_entity(option: str) -> str:
-    if _gliner_model is None:
-        return ""
-    try:
-        entities = _gliner_model.predict_entities(option, _GLINER_LABELS, threshold=0.35)
-        if not entities:
-            return ""
-        entities.sort(key=lambda e: (_GLINER_LABEL_PRIORITY.get(e["label"], 99), e["start"]))
-        return entities[0]["text"].strip()
-    except Exception:
-        return ""
+    m = _QUOTED_RE.search(option)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'\b(19|20)\d{2}s?\b', option)
+    if m:
+        return m.group(0)
+    m = _PROPER_MULTI_RE.search(option)
+    if m:
+        return m.group(0)
+    return ""
 
 
 def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
@@ -325,16 +325,15 @@ def _build_queries(
 def _vote(
     option_texts: list[str],
     global_snips: tuple[str, ...],
-    opt_snips: dict[int, tuple[str, ...]],
     subj_str: str,
     question: str,
 ) -> list[float]:
     votes    = [0.0] * len(option_texts)
     subj_kws = _keywords(subj_str)
+    pool     = list(global_snips)
+    if not pool:
+        return votes
     for i, opt_text in enumerate(option_texts):
-        pool = list(opt_snips.get(i, ())) + list(global_snips)
-        if not pool:
-            continue
         for score, snippet in _bm25_rank(pool, f"{question} {opt_text}", top_k=3):
             subj_hits = len(subj_kws & set(_tokenize(snippet)))
             if subj_hits:
@@ -350,72 +349,46 @@ def _truncate_at_sentence(text: str, max_chars: int) -> str:
     return window[:last_end + 1] if last_end > max_chars // 2 else window.rsplit(" ", 1)[0] + "..."
 
 
-def _best_snippet_for_option(
-    opt_idx: int, opt_text: str,
-    global_snips: tuple[str, ...], opt_snips: dict[int, tuple[str, ...]],
-    question: str,
-) -> str:
-    pool = list(opt_snips.get(opt_idx, ())) + list(global_snips)
-    if not pool:
-        return ""
-    ranked = _bm25_rank(pool, f"{question} {opt_text}", top_k=1)
-    return ranked[0][1] if ranked else ""
-
-
 def _build_llm_prompt(
     question: str,
     option_texts: list[str],
     wiki_text: str,
     global_snips: tuple[str, ...],
-    opt_snips: dict[int, tuple[str, ...]],
     votes: list[float],
     is_negative: bool,
     low_confidence: bool = False,
 ) -> str:
     lines: list[str] = []
     n           = len(option_texts)
-    ranked_opts = sorted(range(n), key=lambda i: votes[i], reverse=not is_negative)
-    winner      = ranked_opts[0]
+    sorted_by_vote = sorted(range(n), key=lambda i: votes[i], reverse=True)
+    rank_map       = {idx: rank for rank, idx in enumerate(sorted_by_vote)}
 
     if is_negative:
-        lines.append(
-            "*** NEGATIVE QUESTION: asks what is NOT true / EXCEPT. ***\n"
-            "Pick the option with the LEAST evidence. "
-            f"Retrieval signals Option {winner} as the LEAST supported — "
-            "output ANSWER: {winner} unless it obviously contradicts known facts."
-        )
-    elif low_confidence:
-        lines.append(
-            "*** WEAK EVIDENCE: all vote scores are near-zero. ***\n"
-            "Retrieval found no clear signal. Use your own expert knowledge to answer."
-        )
-    else:
-        lines.append(
-            f"*** RETRIEVAL VERDICT: Option {winner} has the strongest evidence "
-            f"(score={votes[winner]:.2f}). ***\n"
-            f"You MUST output ANSWER: {winner} as your first line. "
-            "Override this ONLY if the evidence directly contradicts an obvious, well-known fact."
-        )
+        lines.append("[NOT/EXCEPT: pick the option with the LEAST supporting evidence]\n")
 
     if wiki_text:
-        lines.append(f"\n-- WIKIPEDIA --\n{wiki_text}")
-    lines.append("\n-- EVIDENCE PER OPTION (ranked by retrieval score) --")
+        lines.append(f"WIKIPEDIA:\n{wiki_text}\n")
 
-    for rank_pos, i in enumerate(ranked_opts, 1):
-        opt_text = option_texts[i]
-        if low_confidence:
-            tag = "no signal"
-        elif rank_pos == 1:
-            tag = "<<< STRONGEST — USE THIS >>>"
+    if global_snips:
+        top = _bm25_rank(list(global_snips), question, top_k=2)
+        if top:
+            lines.append("WEB CONTEXT:")
+            for _, s in top:
+                lines.append(f"  {_truncate_at_sentence(s, 200)}")
+            lines.append("")
+
+    lines.append(f"QUESTION: {question}\n")
+    lines.append("OPTIONS:")
+    for i, opt in enumerate(option_texts):
+        if not low_confidence:
+            rank = rank_map[i]
+            tag = "  [retrieval: strong]" if rank == 0 else (
+                  "  [retrieval: weak]"   if rank == n - 1 else "")
         else:
-            tag = f"rank {rank_pos}"
-        lines.append(f"\n[Option {i}] {opt_text}  |  {tag}  |  score={votes[i]:.2f}")
-        snip = _best_snippet_for_option(i, opt_text, global_snips, opt_snips, question)
-        lines.append(f"  Evidence: {_truncate_at_sentence(snip, 250)}" if snip
-                     else "  Evidence: (none retrieved)")
+            tag = ""
+        lines.append(f"[{i}] {opt}{tag}")
 
-    if not low_confidence:
-        lines.append(f"\n=> Your answer MUST be: ANSWER: {winner}")
+    lines.append("\nAnswer (0/1/2/3):")
     return "\n".join(lines)
 
 
@@ -461,35 +434,29 @@ def rag_entertainment(
         except Exception: return default
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries) + 1) as pool:
-        wiki_fut    = pool.submit(_fetch_multi_wiki, anchors, query, 600)
+        wiki_fut    = pool.submit(_fetch_multi_wiki, anchors, query, 1200)
         query_futs  = [pool.submit(_ddg_lookup, q.text, 2) for q in queries]
         wiki_text   = _safe(wiki_fut, "")
         query_snips = [_safe(f, ()) for f in query_futs]
 
-    seen_keys: set[str]           = set()
-    _global:   list[str]          = []
-    _opt:      dict[int, list[str]] = {}
-    for wq, snips in zip(queries, query_snips):
+    seen_keys: set[str] = set()
+    global_snips_list: list[str] = []
+    for snips in query_snips:
         for s in snips:
             k = s[:120]
-            if k in seen_keys: continue
-            seen_keys.add(k)
-            if wq.strategy.startswith(("entity_option_", "text_option_")):
-                _opt.setdefault(int(wq.strategy.rsplit("_", 1)[-1]), []).append(s)
-            else:
-                _global.append(s)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                global_snips_list.append(s)
 
-    global_snips = tuple(_global)
-    opt_snips    = {k: tuple(v) for k, v in _opt.items()}
-    print(f"  [ENT] wiki chars={len(wiki_text)}  global_snips={len(global_snips)}"
-          f"  opt_snips={sum(len(v) for v in opt_snips.values())}")
+    global_snips = tuple(global_snips_list)
+    print(f"  [ENT] wiki chars={len(wiki_text)}  global_snips={len(global_snips)}")
 
     has_title_entity = any(label in _TITLE_LABELS for _, label in labeled)
     if not has_title_entity and not wiki_text:
         print("  [ENT] Low confidence -> LLM fallback")
         return ""
 
-    votes          = _vote(list(option_texts[:n_opts]), global_snips, opt_snips, subj_str, query)
+    votes          = _vote(list(option_texts[:n_opts]), global_snips, subj_str, query)
     is_negative    = bool(_NOT_EXCEPT_RE.search(query))
     max_vote       = max(votes) if votes else 0.0
     low_confidence = max_vote < _VOTE_CONFIDENCE_MIN
@@ -498,6 +465,6 @@ def rag_entertainment(
 
     return _build_llm_prompt(
         question=query, option_texts=list(option_texts[:n_opts]),
-        wiki_text=wiki_text, global_snips=global_snips, opt_snips=opt_snips,
+        wiki_text=wiki_text, global_snips=global_snips,
         votes=votes, is_negative=is_negative, low_confidence=low_confidence,
     )

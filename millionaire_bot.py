@@ -102,13 +102,12 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        """You are a quiz expert answering multiple-choice questions.
-
-        STRICT RULES:
-        1. If a RETRIEVAL HINT is present, you MUST start from that option.
-        Override it only if Wikipedia explicitly contradicts it.
-        2. Never invent facts. If unsure, trust the retrieval hint.
-        3. Do not explain. Reply with ONLY the digit: 0, 1, 2 or 3."""
+        "You are an entertainment expert answering a multiple-choice question. "
+        "You are given Wikipedia context and web snippets — read them carefully. "
+        "Options tagged [retrieval: strong] had more keyword matches in retrieved text; "
+        "treat this as a weak hint only. If Wikipedia or your knowledge points elsewhere, follow that. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why."
     ),
 
     COMP_HISTORY_POLITICS: (
