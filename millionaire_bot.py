@@ -6,11 +6,12 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline, BitsAndBytesConfig
 from transformers import logging as transformers_logging
 
-from rag_entertainment import rag_entertainment
-from rag_history        import rag_history
-from rag_science        import rag_science
-from rag_maths          import rag_maths
-from rag_news           import rag_news
+from rag_entertainment         import rag_entertainment
+from rag_history               import rag_history
+from rag_science               import rag_science
+from rag_maths                 import rag_maths
+from rag_news                  import rag_news
+from rag_philosophy_psychology import rag_philosophy_psychology
 
 warnings.filterwarnings("ignore")
 transformers_logging.set_verbosity_error()
@@ -19,13 +20,15 @@ COMP_ENTERTAINMENT      = 0
 COMP_HISTORY_POLITICS   = 1
 COMP_SCIENCE_NATURE     = 2
 COMP_MATHS              = 3
-COMP_NEWS               = 4
+COMP_PHILOSOPHY_AND_PSYCHOLOGY = 4
+COMP_NEWS               = 5
 
 COMP_NAMES = {
     COMP_ENTERTAINMENT:    "Entertainment",
     COMP_HISTORY_POLITICS: "Ancient History & Politics",
     COMP_SCIENCE_NATURE:   "Science & Nature",
     COMP_MATHS:            "Maths",
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: "Philosophy & Psychology",
     COMP_NEWS:             "News",
 }
 
@@ -34,6 +37,7 @@ _MAX_TOKENS = {
     COMP_HISTORY_POLITICS: 40,
     COMP_SCIENCE_NATURE:   60,
     COMP_MATHS:            40,
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 70,
     COMP_NEWS:             70,
 }
 
@@ -47,10 +51,10 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     print(f"Loading model: {model_name}")
 
     quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_quant_type="nf4",        
-    bnb_4bit_use_double_quant=True,   
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
     )
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
@@ -72,30 +76,34 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     print("The model is ready to answer.")
 
     """try:
-        import rag_science
-        rag_science.setup_science_rag()
-    except Exception as e:
-        print(f"Warning: science RAG setup failed: {e}")"""
-
-    try:
-        import rag_maths
-        rag_maths.setup_maths_rag()
-    except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")
-
-    """try:
-        import rag_entertainment
-        rag_entertainment.setup_entertainment_rag()
+        import rag_entertainment as _rag_ent
+        _rag_ent.setup_entertainment_rag()
     except Exception as e:
         print(f"Warning: entertainment RAG setup failed: {e}")
 
     try:
-        import rag_news
-        rag_news.setup_news_rag()
+        import rag_science as _rag_sci
+        _rag_sci.setup_science_rag()
+    except Exception as e:
+        print(f"Warning: science RAG setup failed: {e}")
+
+    try:
+        import rag_maths as _rag_mth
+        _rag_mth.setup_maths_rag()
+    except Exception as e:
+        print(f"Warning: maths RAG setup failed: {e}")
+
+    try:
+        import rag_news as _rag_nws
+        _rag_nws.setup_news_rag()
     except Exception as e:
         print(f"Warning: news RAG setup failed: {e}")"""
 
-    
+    try:
+        import rag_philosophy_psychology as _rag_pp
+        _rag_pp.setup_philosophy_psychology_rag()
+    except Exception as e:
+        print(f"Warning: philosophy & psychology RAG setup failed: {e}")
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
@@ -111,7 +119,6 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
             messages,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-    #        temperature=0.1,
         )
     except Exception as e:
         if "System role not supported" in str(e):
@@ -120,7 +127,6 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
                 merged,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-    #        temperature=0.1,
             )
         else:
             raise
@@ -182,6 +188,14 @@ SYSTEM_PROMPTS = {
         "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
         "Then one sentence explaining why, quoting the article."
     ),
+
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: (
+        "You are a philosophy and psychology expert answering multiple-choice questions. "
+        "An article may be provided as context — read it carefully before answering. "
+        "ALWAYS prioritize the article over your own knowledge when it is relevant. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why."
+    ),
 }
 
 
@@ -196,6 +210,8 @@ def get_context(comp_id: int, question_text: str, option_texts: list[str] | None
         return rag_maths(question_text, option_texts or [])
     elif comp_id == COMP_NEWS:
         return rag_news(question_text, option_texts=option_texts or [])
+    elif comp_id == COMP_PHILOSOPHY_AND_PSYCHOLOGY:
+        return rag_philosophy_psychology(question_text, option_texts=option_texts or [])
     return ""
 
 
