@@ -25,6 +25,11 @@ _STOP_WORDS = {
     "single", "track", "series", "actor", "actress", "director", "article",
 }
 
+_STOP_WORDS_QUERY = _STOP_WORDS - {
+    "film", "movie", "song", "show", "album", "band", "role",
+    "character", "single", "track", "series", "actor", "actress", "director",
+}
+
 _GLINER_MODEL_NAME = "urchade/gliner_medium-v2.1"
 _GLINER_LABELS = [
     "movie", "film", "TV show", "TV series",
@@ -79,7 +84,8 @@ def _keywords(text: str) -> set[str]:
 
 
 def _clean_query_text(text: str) -> str:
-    kept = [w for w in text.split() if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS]
+    kept = [w for w in text.split()
+            if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS_QUERY]
     return " ".join(kept) if kept else text
 
 
@@ -222,8 +228,23 @@ def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
         return []
 
 
+def _vote(option_texts: list, opt_snips: list[list[str]], subj_str: str) -> list[float]:
+    votes = [0.0] * len(option_texts)
+    subj_kws = _keywords(subj_str)
+    for i, snips in enumerate(opt_snips):
+        opt_kws = _keywords(option_texts[i])
+        for snip in snips:
+            tokens = set(_tokenize(snip))
+            opt_hits  = len(opt_kws  & tokens)
+            subj_hits = len(subj_kws & tokens)
+            if opt_hits > 0 and subj_hits > 0:
+                votes[i] += opt_hits * subj_hits
+    return votes
+
+
 def rag_entertainment(query: str, num_results: int = 3, option_texts: list = None) -> str:
-    labeled = _extract_subjects_gliner(query)
+    all_text = query + " " + " ".join(option_texts or [])
+    labeled = _extract_subjects_gliner(all_text)
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = _pick_main_term(labeled)
@@ -244,14 +265,9 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
 
     n_opts = min(len(option_texts), 4)
     cand_queries = [
-        f"{_clean_query_text(option_texts[i])[:50]} {subj_str}".strip()[:90]
+        f"{subj_str} {option_texts[i]}".strip()[:120]
         for i in range(n_opts)
     ]
-
-    pool        = concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 2)
-    wiki_fut    = pool.submit(_wiki_lookup, main_term)
-    general_fut = pool.submit(_ddg_lookup, f"{subj_str} {query[:50]}".strip()[:90], num_results)
-    opt_futs    = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
 
     def _safe(fut, default):
         try:
@@ -259,19 +275,31 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
         except Exception:
             return default
 
-    wiki_full    = _safe(wiki_fut, "")
-    general_snip = _safe(general_fut, [])
-    opt_snips    = [_safe(f, []) for f in opt_futs]
-    pool.shutdown(wait=False)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 1) as pool:
+        wiki_fut = pool.submit(_wiki_lookup, main_term)
+        opt_futs = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
+        wiki_full = _safe(wiki_fut, "")
+        opt_snips = [_safe(f, []) for f in opt_futs]
 
-    wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=1400)
+    wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=800)
+    votes  = _vote(option_texts[:n_opts], opt_snips, subj_str)
+    winner = max(range(n_opts), key=lambda i: votes[i])
 
-    all_snippets: list[str] = []
+    parts = []
+    if wiki_text:
+        parts.append(f"WIKIPEDIA:\n{wiki_text}")
+
     seen_key: set[str] = set()
-    for s in filter(None, [wiki_text, *general_snip, *(s for snips in opt_snips for s in snips)]):
-        k = s[:120]
-        if k not in seen_key:
-            seen_key.add(k)
-            all_snippets.append(s)
+    for i, snips in enumerate(opt_snips):
+        marker = " ← STRONGEST EVIDENCE" if i == winner and votes[winner] > 0 else ""
+        label  = f"[{i}] {option_texts[i]}{marker}"
+        for s in snips:
+            k = s[:120]
+            if k not in seen_key:
+                seen_key.add(k)
+                parts.append(f"{label}:\n{s[:300]}")
+                break
+        else:
+            parts.append(f"{label}: (no evidence)")
 
-    return "\n\n".join(all_snippets)[:2500]
+    return "\n\n".join(parts)[:1200]
