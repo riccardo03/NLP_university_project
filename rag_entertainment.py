@@ -191,6 +191,24 @@ def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
         return []
 
 
+def _extract_option_entity(option: str) -> str:
+    """Single primary-pass GLiNER on one option string.
+
+    Returns the highest-priority entity text, or '' when GLiNER is unavailable
+    or the option contains no recognisable entity (e.g. 'Indifferent and distant').
+    """
+    if _gliner_model is None:
+        return ""
+    try:
+        entities = _gliner_model.predict_entities(option, _GLINER_LABELS, threshold=0.35)
+        if not entities:
+            return ""
+        entities.sort(key=lambda e: (_GLINER_LABEL_PRIORITY.get(e["label"], 99), e["start"]))
+        return entities[0]["text"].strip()
+    except Exception:
+        return ""
+
+
 def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
     persons = [(t, l) for t, l in labeled if l in _PERSON_LABELS]
     titles  = [(t, l) for t, l in labeled if l in _TITLE_LABELS]
@@ -375,6 +393,7 @@ def _build_queries(
     question: str,
     option_texts: list[str],
     labeled: list[tuple[str, str]],
+    option_entities: list[str],
     subj_str: str,
     main_term: str,
     question_type: str,
@@ -382,13 +401,15 @@ def _build_queries(
     """
     Build semantic search queries based on question type.
 
-    Biography questions (e.g. "What was Bogart's relationship with his father?"):
-      - Option texts like "Indifferent and distant" have no encyclopedic footprint.
-      - Use entity + biography keywords instead.
+    Global queries (from question entities) feed both Wikipedia and DDG.
+    Per-option queries (from option_entities) feed DDG only for that option.
 
-    Factual questions (e.g. "Which film starred Bogart as Sam Spade?"):
-      - Option texts are plausible film/song titles that DO appear in articles.
-      - Entity + option queries are effective.
+    Biography questions — option texts like "Indifferent and distant" have no
+    encyclopedic footprint so we use entity + bio keywords for global queries,
+    and per-option entity queries only when GLiNER extracted something.
+
+    Factual questions — option texts are film/song titles that DO appear in
+    articles; per-option entity queries are the primary signal.
     """
     queries: list[WeightedQuery] = []
     clean_q = _clean_query_text(question)
@@ -418,7 +439,7 @@ def _build_queries(
                 weight=1.4,
                 strategy="biography_keywords",
             ))
-        # Q4: secondary person entity alone — gets their Wikipedia page directly.
+        # Q4: secondary person entity — gets their Wikipedia page directly.
         secondary = [t for t, _ in labeled if t != main_term]
         if secondary:
             queries.append(WeightedQuery(
@@ -426,32 +447,48 @@ def _build_queries(
                 weight=1.3,
                 strategy="secondary_entity",
             ))
-    else:
-        # Factual: option text IS encyclopedic (film titles, song names, etc.).
-        # Limit to first 2 options to avoid over-querying.
-        for idx, opt in enumerate(option_texts[:2]):
-            opt_clean = _clean_query_text(opt)
+
+    # Per-option entity queries: run for all question types.
+    # Each option's GLiNER entity (if any) produces a targeted DDG query.
+    # Options with no extractable entity (e.g. "Indifferent and distant") are skipped.
+    for idx, opt in enumerate(option_texts):
+        ent = option_entities[idx] if idx < len(option_entities) else ""
+        if ent:
             queries.append(WeightedQuery(
-                text=f"{main_term} {opt_clean}"[:120],
-                weight=1.0,
+                text=f"{main_term} {ent}"[:120],
+                weight=1.1 if question_type == "biography" else 1.0,
                 strategy=f"entity_option_{idx}",
             ))
+        elif question_type == "factual" and idx < 2:
+            # Fallback for factual options when GLiNER found nothing: use cleaned text.
+            opt_clean = _clean_query_text(opt)
+            if opt_clean:
+                queries.append(WeightedQuery(
+                    text=f"{main_term} {opt_clean}"[:120],
+                    weight=0.8,
+                    strategy=f"text_option_{idx}",
+                ))
 
     return queries
 
 
 def _vote(
     option_texts: list[str],
-    all_snips: tuple[str, ...],
+    global_snips: tuple[str, ...],
+    opt_snips: dict[int, tuple[str, ...]],
     subj_str: str,
     question: str,
 ) -> list[float]:
     votes    = [0.0] * len(option_texts)
     subj_kws = _keywords(subj_str)
-    corpus   = list(all_snips)
 
     for i, opt_text in enumerate(option_texts):
-        ranked = _bm25_rank(corpus, f"{question} {opt_text}", top_k=3)
+        # Option-specific snippets first (fetched for this option's query),
+        # then global snippets as a fallback pool.
+        pool = list(opt_snips.get(i, ())) + list(global_snips)
+        if not pool:
+            continue
+        ranked = _bm25_rank(pool, f"{question} {opt_text}", top_k=3)
         for bm25_score, snippet in ranked:
             tokens    = set(_tokenize(snippet))
             subj_hits = len(subj_kws & tokens)
@@ -473,13 +510,16 @@ def _truncate_at_sentence(text: str, max_chars: int) -> str:
 
 
 def _best_snippet_for_option(
+    opt_idx: int,
     opt_text: str,
-    all_snips: tuple[str, ...],
+    global_snips: tuple[str, ...],
+    opt_snips: dict[int, tuple[str, ...]],
     question: str,
 ) -> str:
-    if not all_snips:
+    pool = list(opt_snips.get(opt_idx, ())) + list(global_snips)
+    if not pool:
         return ""
-    ranked = _bm25_rank(list(all_snips), f"{question} {opt_text}", top_k=1)
+    ranked = _bm25_rank(pool, f"{question} {opt_text}", top_k=1)
     return ranked[0][1] if ranked else ""
 
 
@@ -487,7 +527,8 @@ def _build_llm_prompt(
     question: str,
     option_texts: list[str],
     wiki_text: str,
-    all_snips: tuple[str, ...],
+    global_snips: tuple[str, ...],
+    opt_snips: dict[int, tuple[str, ...]],
     votes: list[float],
     is_negative: bool,
     low_confidence: bool = False,
@@ -521,7 +562,7 @@ def _build_llm_prompt(
             rank_pos = ranked_opts.index(i) + 1
             hint     = "strongest evidence" if rank_pos == 1 else f"rank {rank_pos}"
         lines.append(f"\n[Option {i}] {opt_text}  ({hint}, score={votes[i]:.2f})")
-        snip = _best_snippet_for_option(opt_text, all_snips, question)
+        snip = _best_snippet_for_option(i, opt_text, global_snips, opt_snips, question)
         if snip:
             lines.append(f"  Evidence: {_truncate_at_sentence(snip, 250)}")
         else:
@@ -535,8 +576,7 @@ def rag_entertainment(
     num_results: int = 3,
     option_texts: list[str] | None = None,
 ) -> str:
-    all_text = query + " " + " ".join(option_texts or [])
-    labeled  = _extract_subjects_gliner(all_text)
+    labeled = _extract_subjects_gliner(query)
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = _pick_main_term(labeled)
@@ -559,10 +599,12 @@ def rag_entertainment(
         ddg  = _ddg_lookup(subj_str, num_results)
         return "\n\n".join(filter(None, [wiki, *ddg]))[:1500]
 
-    n_opts        = min(len(option_texts), 4)
-    question_type = _detect_question_type(query)
-    queries       = _build_queries(
-        query, list(option_texts[:n_opts]), labeled, subj_str, main_term, question_type
+    n_opts          = min(len(option_texts), 4)
+    question_type   = _detect_question_type(query)
+    option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
+    print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
+    queries         = _build_queries(
+        query, list(option_texts[:n_opts]), labeled, option_entities, subj_str, main_term, question_type
     )
     print(f"  [ENT] question_type={question_type!r}  queries={[(q.strategy, q.text) for q in queries]}")
 
@@ -578,25 +620,36 @@ def rag_entertainment(
         wiki_text   = _safe(wiki_fut, "")
         query_snips = [_safe(f, ()) for f in query_futs]
 
-    # Merge all snippets into a single deduplicated pool.
+    # Partition snippets: option-specific queries → opt_snips[idx],
+    # everything else (entity_question, all_entities, bio, secondary) → global_snips.
     seen_keys: set[str] = set()
-    flat: list[str] = []
-    for snips in query_snips:
+    _global: list[str] = []
+    _opt: dict[int, list[str]] = {}
+
+    for wq, snips in zip(queries, query_snips):
         for s in snips:
             k = s[:120]
-            if k not in seen_keys:
-                seen_keys.add(k)
-                flat.append(s)
-    all_snips = tuple(flat)
+            if k in seen_keys:
+                continue
+            seen_keys.add(k)
+            if wq.strategy.startswith(("entity_option_", "text_option_")):
+                opt_idx = int(wq.strategy.rsplit("_", 1)[-1])
+                _opt.setdefault(opt_idx, []).append(s)
+            else:
+                _global.append(s)
 
-    print(f"  [ENT] wiki chars={len(wiki_text)}  pool size={len(all_snips)}")
+    global_snips = tuple(_global)
+    opt_snips    = {k: tuple(v) for k, v in _opt.items()}
+
+    n_opt_snips = sum(len(v) for v in opt_snips.values())
+    print(f"  [ENT] wiki chars={len(wiki_text)}  global_snips={len(global_snips)}  opt_snips={n_opt_snips}")
 
     has_title_entity = any(label in _TITLE_LABELS for _, label in labeled)
     if not has_title_entity and not wiki_text:
         print("  [ENT] Low confidence -> LLM fallback")
         return ""
 
-    votes          = _vote(list(option_texts[:n_opts]), all_snips, subj_str, query)
+    votes          = _vote(list(option_texts[:n_opts]), global_snips, opt_snips, subj_str, query)
     is_negative    = bool(_NOT_EXCEPT_RE.search(query))
     max_vote       = max(votes) if votes else 0.0
     low_confidence = max_vote < _VOTE_CONFIDENCE_MIN
@@ -607,7 +660,8 @@ def rag_entertainment(
         question=query,
         option_texts=list(option_texts[:n_opts]),
         wiki_text=wiki_text,
-        all_snips=all_snips,
+        global_snips=global_snips,
+        opt_snips=opt_snips,
         votes=votes,
         is_negative=is_negative,
         low_confidence=low_confidence,
