@@ -287,6 +287,11 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
 
     print(f"  [ENT] wiki chars={len(wiki_full)}  snips per opt={[len(s) for s in opt_snips]}")
 
+    has_title_entity = any(label in _TITLE_LABELS for _, label in labeled)
+    if not has_title_entity and not wiki_full:
+        print("  [ENT] Low confidence → LLM fallback")
+        return ""
+
     wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=800)
     votes  = _vote(option_texts[:n_opts], opt_snips, subj_str)
     winner = max(range(n_opts), key=lambda i: votes[i])
