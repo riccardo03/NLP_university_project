@@ -176,5 +176,23 @@ def rag_science(query: str, option_texts: Optional[list] = None) -> str:
                 "Pass option_texts explicitly."
             )
 
+    print(f"  [Science] stem: {stem!r}")
+    print(f"  [Science] options: {options}")
+
     candidates = multi_query_retrieve(stem, options)
-    return "\n\n".join(hybrid_retrieve(stem, candidates, k=5, alpha=0.6))
+    print(f"  [Science] candidates after multi-query: {len(candidates)}")
+
+    top_passages = hybrid_retrieve(stem, candidates, k=5, alpha=0.6)
+    print(f"  [Science] passages after hybrid rerank: {len(top_passages)}")
+
+    # Confidence: fraction of stem keywords (4+ chars) present in the top passage
+    stem_kws = {w for w in re.findall(r'[a-z]{4,}', stem.lower())}
+    if top_passages and stem_kws:
+        hits       = sum(1 for kw in stem_kws if kw in top_passages[0].lower())
+        confidence = hits / len(stem_kws) * 100
+        print(f"  [Science] confidence: {confidence:.0f}%  ({hits}/{len(stem_kws)} stem keywords in top passage)")
+        print(f"  [Science] top passage: {top_passages[0][:100].replace(chr(10), ' ')!r}...")
+    else:
+        print("  [Science] confidence: 0%  (no passages or no stem keywords)")
+
+    return "\n\n".join(top_passages)

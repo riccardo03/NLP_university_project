@@ -5,6 +5,7 @@ No Wikipedia. No BM25 voting. No caching (news changes daily).
 Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 """
 
+import concurrent.futures
 import html as _html_module
 import re
 
@@ -188,57 +189,52 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             t for t in tokens if len(t) >= 4 and t not in _STOP_WORDS_NEWS
         )[:60]
 
-    # 3. Query building — date anchor in every query
-    opt_kw = ""
-    if option_texts:
-        for opt in option_texts:
-            kws = [
-                t for t in _TOKEN_RE.findall(opt.lower())
-                if len(t) >= 4 and t not in _STOP_WORDS_NEWS
-            ]
-            if kws:
-                opt_kw = kws[0]
-                break
-
+    # 3. Query building — one query per option, all anchored to date
     date_anchor = raw_date or ""
-    alt_anchor  = alt_date if (alt_date and alt_date != raw_date) else ""
+    n_opts      = min(len(option_texts), 4) if option_texts else 0
 
-    if date_anchor:
-        q1 = f"{main_term} {date_anchor}".strip()
-        q2 = (f"{main_term} {alt_anchor}".strip()
-              if alt_anchor else f"{main_term} {date_anchor} news")
-        q3 = (f"{main_term} {date_anchor} {opt_kw}".strip()
-              if opt_kw else f"{main_term} {date_anchor} article")
+    def _clean_option(opt: str) -> str:
+        words = [
+            t for t in _TOKEN_RE.findall(opt.lower())
+            if len(t) >= 3 and t not in _STOP_WORDS_NEWS
+        ]
+        return " ".join(words[:4])
+
+    if n_opts:
+        queries = [
+            " ".join(filter(None, [main_term, date_anchor, _clean_option(option_texts[i])]))
+            for i in range(n_opts)
+        ]
     else:
-        q1 = main_term
-        q2 = f"{main_term} news"
-        q3 = f"{main_term} {opt_kw}".strip() if opt_kw else f"{main_term} latest"
+        queries = [" ".join(filter(None, [main_term, date_anchor]))]
 
-    queries = [q for q in [q1, q2, q3] if q]
     print(f"  [News] queries: {queries}")
 
-    # 4. Article fetching — stop at first article that contains a question keyword
+    # 4. Article fetching — run all queries in parallel, take first relevant result
     q_keywords = {
         t for t in _TOKEN_RE.findall(query.lower())
         if len(t) >= 4 and t not in _STOP_WORDS_NEWS
     }
 
+    def _search_and_fetch(q_text: str) -> tuple[str, str]:
+        """Return (article_text, url) for the first relevant result, or ("", "")."""
+        for r in _ddg_search(q_text):
+            text = _fetch_article(r["url"])
+            if text and any(kw in text.lower() for kw in q_keywords):
+                return text, r["url"]
+        return "", ""
+
     article_text = ""
     article_url  = ""
 
-    for q_text in queries:
-        if article_text:
-            break
-        for r in _ddg_search(q_text):
-            url = r["url"]
-            text = _fetch_article(url)
-            if not text:
-                continue
-            if any(kw in text.lower() for kw in q_keywords):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        futures = {pool.submit(_search_and_fetch, q): q for q in queries}
+        for fut in concurrent.futures.as_completed(futures):
+            text, url = fut.result()
+            if text and not article_text:
                 article_text = text
                 article_url  = url
                 print(f"  [News] article found ({len(text)} chars): {url[:80]}")
-                break
 
     if not article_text:
         print("  [News] No article found — LLM fallback")
