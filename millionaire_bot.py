@@ -34,7 +34,7 @@ _MAX_TOKENS = {
     COMP_HISTORY_POLITICS: 40,
     COMP_SCIENCE_NATURE:   60,
     COMP_MATHS:            40,
-    COMP_NEWS:             40,
+    COMP_NEWS:             70,
 }
 
 _model     = None
@@ -71,19 +71,19 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     )
     print("The model is ready to answer.")
 
-    try:
+    """try:
         import rag_science
         rag_science.setup_science_rag()
     except Exception as e:
-        print(f"Warning: science RAG setup failed: {e}")
-"""
+        print(f"Warning: science RAG setup failed: {e}")"""
+
     try:
         import rag_maths
         rag_maths.setup_maths_rag()
     except Exception as e:
         print(f"Warning: maths RAG setup failed: {e}")
 
-    try:
+    """try:
         import rag_entertainment
         rag_entertainment.setup_entertainment_rag()
     except Exception as e:
@@ -93,8 +93,8 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         import rag_news
         rag_news.setup_news_rag()
     except Exception as e:
-        print(f"Warning: news RAG setup failed: {e}")
-        """
+        print(f"Warning: news RAG setup failed: {e}")"""
+
     
 
 

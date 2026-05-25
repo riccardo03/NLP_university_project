@@ -9,7 +9,6 @@ Retrieval : Multi-query FAISS → BM25 hybrid rerank (RRF)
 
 import os
 import re
-from typing import Optional
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -46,7 +45,7 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     print("[Science RAG] Building corpus...")
     passages = []
 
-    for split in ("train", "validation", "test"):  # era solo "train"
+    for split in ("train", "validation", "test"):
         for item in load_dataset("allenai/sciq", split=split):
             s = (item.get("support") or "").strip()
             if s and len(s.split()) >= 5:
@@ -86,11 +85,10 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     _science_passages = unique
     print(f"  {len(_science_passages):,} passages")
 
-    # --- BM25 index for sparse retrieval ---
     _bm25_index = BM25Okapi([p.lower().split() for p in _science_passages])
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
-    _science_embedder = SentenceTransformer(embed_model, device="cuda")
+    _science_embedder = SentenceTransformer(embed_model, device="cpu")
     emb = _science_embedder.encode(
         _science_passages,
         batch_size=32,
@@ -177,7 +175,7 @@ def hybrid_retrieve(query: str, passages: list, k: int = 5, alpha: float = 0.6) 
     return sorted(passages, key=lambda p: scores[p], reverse=True)[:k]
 
 
-def rag_science(query: str, option_texts: Optional[list] = None) -> str:
+def rag_science(query: str, option_texts: list | None = None) -> str:
     if option_texts is not None:
         if len(option_texts) != 4:
             raise ValueError(f"Expected 4 options, got {len(option_texts)}.")
