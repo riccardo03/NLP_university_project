@@ -81,6 +81,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: maths RAG setup failed: {e}")
 
+    try:
+        import rag_entertainment
+        rag_entertainment.setup_entertainment_rag()
+    except Exception as e:
+        print(f"Warning: entertainment RAG setup failed: {e}")
+
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
     if _pipe is None:
@@ -170,7 +176,7 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     Select the correct RAG pipeline based on competition.
     """
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_entertainment(question_text, option_texts or [])
+        return rag_entertainment(question_text, option_texts=option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:

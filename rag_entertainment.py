@@ -51,22 +51,23 @@ _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
 
-# GLiNER lazy singleton
-_gliner_model       = None
-_gliner_model_tried = False
+# GLiNER singleton — populated by setup_entertainment_rag()
+_gliner_model: object = None
 
 
 def _get_gliner_model():
-    global _gliner_model, _gliner_model_tried
-    if _gliner_model_tried:
-        return _gliner_model
-    _gliner_model_tried = True
+    return _gliner_model
+
+
+def setup_entertainment_rag() -> None:
+    global _gliner_model
+    print("  [RAG-Entertainment] Loading GLiNER model…")
     try:
         from gliner import GLiNER
         _gliner_model = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
+        print("  [RAG-Entertainment] GLiNER ready.")
     except Exception as e:
-        print(f"  [RAG] GLiNER model unavailable: {e}")
-    return _gliner_model
+        print(f"  [RAG-Entertainment] GLiNER unavailable: {e}")
 
 
 def _tokenize(text: str) -> list[str]:
