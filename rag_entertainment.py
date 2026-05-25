@@ -248,15 +248,18 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = _pick_main_term(labeled)
+        print(f"  [ENT] GLiNER entities: {labeled}")
     else:
         subjects  = _extract_subjects_regex(query)
         main_term = subjects[0] if subjects else ""
+        print(f"  [ENT] regex subjects: {subjects}")
 
     if not main_term:
         kws = [w for w in _tokenize(query) if len(w) >= 4 and w not in _STOP_WORDS]
         main_term = " ".join(kws[:4]) if kws else query[:60]
 
     subj_str = " ".join(subjects[:2]) if subjects else main_term
+    print(f"  [ENT] main_term={main_term!r}  subj_str={subj_str!r}")
 
     if not option_texts:
         wiki = _wiki_relevant_passages(_wiki_lookup(main_term), query, max_chars=1200)
@@ -268,6 +271,7 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
         f"{subj_str} {option_texts[i]}".strip()[:120]
         for i in range(n_opts)
     ]
+    print(f"  [ENT] DDG queries: {cand_queries}")
 
     def _safe(fut, default):
         try:
@@ -281,9 +285,12 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
         wiki_full = _safe(wiki_fut, "")
         opt_snips = [_safe(f, []) for f in opt_futs]
 
+    print(f"  [ENT] wiki chars={len(wiki_full)}  snips per opt={[len(s) for s in opt_snips]}")
+
     wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=800)
     votes  = _vote(option_texts[:n_opts], opt_snips, subj_str)
     winner = max(range(n_opts), key=lambda i: votes[i])
+    print(f"  [ENT] votes={votes}  winner=[{winner}]")
 
     parts = []
     if wiki_text:
