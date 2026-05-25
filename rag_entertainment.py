@@ -262,10 +262,19 @@ def _snippet_polarity(snippet: str, option: str) -> float:
     return 1.0
 
 
-def _extract_question_keywords(question: str, main_term: str) -> str:
+def _extract_question_keywords(
+    question: str,
+    main_term: str,
+    labeled: list[tuple[str, str]],
+) -> str:
     parts: list[str] = []
     seen:  set[str]  = set()
     main_lower = main_term.lower()
+
+    def _add(s: str) -> None:
+        sl = s.strip().lower()
+        if sl and sl not in seen and sl not in main_lower and main_lower not in sl:
+            seen.add(sl); parts.append(s.strip())
 
     # Years (always useful context regardless of main_term)
     for m in re.finditer(r'\b((?:19|20)\d{2}s?)\b', question):
@@ -273,17 +282,17 @@ def _extract_question_keywords(question: str, main_term: str) -> str:
         if y not in seen:
             seen.add(y); parts.append(y)
 
-    # Quoted terms not already covered by main_term
-    for term in _QUOTED_RE.findall(question):
-        tl = term.strip().lower()
-        if tl and tl not in seen and tl not in main_lower and main_lower not in tl:
-            seen.add(tl); parts.append(term.strip())
+    # GLiNER entities from the question, skipping main_term
+    for text, _ in labeled:
+        _add(text)
 
-    # Multi-word proper nouns not already covered by main_term
+    # Quoted terms not already covered
+    for term in _QUOTED_RE.findall(question):
+        _add(term)
+
+    # Multi-word proper nouns not already covered
     for m in _PROPER_MULTI_RE.findall(question):
-        ml = m.lower()
-        if ml not in seen and ml not in main_lower and main_lower not in ml:
-            seen.add(ml); parts.append(m)
+        _add(m)
 
     return " ".join(parts)
 
@@ -293,9 +302,10 @@ def _build_queries(
     option_texts: list[str],
     option_entities: list[str],
     main_term: str,
+    labeled: list[tuple[str, str]],
 ) -> list[WeightedQuery]:
     queries: list[WeightedQuery] = []
-    q_kws = _extract_question_keywords(question, main_term)
+    q_kws = _extract_question_keywords(question, main_term, labeled)
     for idx, opt in enumerate(option_texts):
         ent = option_entities[idx] if idx < len(option_entities) else ""
         if ent:
@@ -409,7 +419,7 @@ def rag_entertainment(
     n_opts          = min(len(option_texts), 4)
     option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
     print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
-    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term)
+    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term, labeled)
     print(f"  [ENT] queries={[(q.strategy, q.text) for q in queries]}")
 
     def _safe(fut, default):
