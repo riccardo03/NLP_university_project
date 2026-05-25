@@ -91,13 +91,13 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         import rag_maths as _rag_mth
         _rag_mth.setup_maths_rag()
     except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")
+        print(f"Warning: maths RAG setup failed: {e}")"""
 
     try:
         import rag_news as _rag_nws
         _rag_nws.setup_news_rag()
     except Exception as e:
-        print(f"Warning: news RAG setup failed: {e}")"""
+        print(f"Warning: news RAG setup failed: {e}")
 
     try:
         import rag_philosophy_psychology as _rag_pp
