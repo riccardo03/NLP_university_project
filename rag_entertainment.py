@@ -373,28 +373,49 @@ def _build_llm_prompt(
     low_confidence: bool = False,
 ) -> str:
     lines: list[str] = []
-    if is_negative:
-        lines.append("[NEGATIVE QUESTION: This asks what is NOT true / EXCEPT. "
-                     "Choose the option with the LEAST supporting evidence.]")
-    if low_confidence:
-        lines.append("[WEAK EVIDENCE: Retrieved vote scores are near-zero — "
-                     "rank hints are unreliable. Use your own expertise to answer.]")
-    if wiki_text:
-        lines.append(f"-- WIKIPEDIA --\n{wiki_text}")
-    lines.append("-- EVIDENCE PER OPTION --")
-
     n           = len(option_texts)
     ranked_opts = sorted(range(n), key=lambda i: votes[i], reverse=not is_negative)
-    for i, opt_text in enumerate(option_texts):
+    winner      = ranked_opts[0]
+
+    if is_negative:
+        lines.append(
+            "*** NEGATIVE QUESTION: asks what is NOT true / EXCEPT. ***\n"
+            "Pick the option with the LEAST evidence. "
+            f"Retrieval signals Option {winner} as the LEAST supported — "
+            "output ANSWER: {winner} unless it obviously contradicts known facts."
+        )
+    elif low_confidence:
+        lines.append(
+            "*** WEAK EVIDENCE: all vote scores are near-zero. ***\n"
+            "Retrieval found no clear signal. Use your own expert knowledge to answer."
+        )
+    else:
+        lines.append(
+            f"*** RETRIEVAL VERDICT: Option {winner} has the strongest evidence "
+            f"(score={votes[winner]:.2f}). ***\n"
+            f"You MUST output ANSWER: {winner} as your first line. "
+            "Override this ONLY if the evidence directly contradicts an obvious, well-known fact."
+        )
+
+    if wiki_text:
+        lines.append(f"\n-- WIKIPEDIA --\n{wiki_text}")
+    lines.append("\n-- EVIDENCE PER OPTION (ranked by retrieval score) --")
+
+    for rank_pos, i in enumerate(ranked_opts, 1):
+        opt_text = option_texts[i]
         if low_confidence:
-            hint = "no reliable evidence"
+            tag = "no signal"
+        elif rank_pos == 1:
+            tag = "<<< STRONGEST — USE THIS >>>"
         else:
-            rank_pos = ranked_opts.index(i) + 1
-            hint     = "strongest evidence" if rank_pos == 1 else f"rank {rank_pos}"
-        lines.append(f"\n[Option {i}] {opt_text}  ({hint}, score={votes[i]:.2f})")
+            tag = f"rank {rank_pos}"
+        lines.append(f"\n[Option {i}] {opt_text}  |  {tag}  |  score={votes[i]:.2f}")
         snip = _best_snippet_for_option(i, opt_text, global_snips, opt_snips, question)
         lines.append(f"  Evidence: {_truncate_at_sentence(snip, 250)}" if snip
                      else "  Evidence: (none retrieved)")
+
+    if not low_confidence:
+        lines.append(f"\n=> Your answer MUST be: ANSWER: {winner}")
     return "\n".join(lines)
 
 

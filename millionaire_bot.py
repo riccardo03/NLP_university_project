@@ -102,13 +102,13 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are an entertainment expert answering a multiple choice question. "
-        "Context is provided showing retrieved evidence per option with confidence scores. "
-        "Use the evidence when it clearly supports an answer; rely on your own expertise "
-        "when evidence is weak, absent, or contradicts your knowledge. "
-        "For NOT/EXCEPT questions, pick the option with the LEAST supporting evidence. "
-        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
-        "Then one sentence explaining why."
+        """You are a quiz expert answering multiple-choice questions.
+
+        STRICT RULES:
+        1. If a RETRIEVAL HINT is present, you MUST start from that option.
+        Override it only if Wikipedia explicitly contradicts it.
+        2. Never invent facts. If unsure, trust the retrieval hint.
+        3. Do not explain. Reply with ONLY the digit: 0, 1, 2 or 3."""
     ),
 
     COMP_HISTORY_POLITICS: (
