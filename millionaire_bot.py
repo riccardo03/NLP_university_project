@@ -3,7 +3,7 @@ import time
 import warnings
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline, BitsAndBytesConfig
 from transformers import logging as transformers_logging
 
 from rag_entertainment import rag_entertainment
@@ -32,7 +32,7 @@ COMP_NAMES = {
 _MAX_TOKENS = {
     COMP_ENTERTAINMENT:    30,
     COMP_HISTORY_POLITICS: 40,
-    COMP_SCIENCE_NATURE:   40,
+    COMP_SCIENCE_NATURE:   60,
     COMP_MATHS:            40,
     COMP_NEWS:             40,
 }
@@ -45,11 +45,18 @@ _pipe      = None
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
     print(f"Loading model: {model_name}")
+
+    quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4",        
+    bnb_4bit_use_double_quant=True,   
+    )
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
-        torch_dtype=torch.float16,
+        quantization_config=quantization_config,
         trust_remote_code=True,  # required for Qwen
     )
     _model.config.max_length = None
@@ -69,7 +76,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         rag_science.setup_science_rag()
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
-
+"""
     try:
         import rag_maths
         rag_maths.setup_maths_rag()
@@ -87,6 +94,8 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         rag_news.setup_news_rag()
     except Exception as e:
         print(f"Warning: news RAG setup failed: {e}")
+        """
+    
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
@@ -101,8 +110,8 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         outputs = _pipe(
             messages,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.1,
+            do_sample=False,
+    #        temperature=0.1,
         )
     except Exception as e:
         if "System role not supported" in str(e):
@@ -110,8 +119,8 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
             outputs = _pipe(
                 merged,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.1,
+                do_sample=False,
+    #        temperature=0.1,
             )
         else:
             raise
@@ -152,9 +161,14 @@ SYSTEM_PROMPTS = {
     ),
 
     COMP_SCIENCE_NATURE: (
-        "You are a careful science tutor. Use the provided context to answer "
-        "multiple-choice science questions. Reason briefly (2-4 sentences), "
-        "then end with EXACTLY one line: 'Answer: [N]' where N is 0, 1, 2, or 3."
+        "You are an expert science tutor answering multiple-choice questions.\n"
+        "You are given a Context that may or may not be relevant.\n"
+        "Rules:\n"
+        "1. If the Context directly answers the question, use it.\n"
+        "2. If the Context is only loosely related, prefer your own knowledge.\n"
+        "3. If the Context contradicts basic scientific facts, ignore it.\n"
+        "The VERY FIRST LINE must be: ANSWER: X (where X is 0, 1, 2, or 3).\n"
+        "Then one sentence of justification."
     ),
 
     COMP_MATHS: (

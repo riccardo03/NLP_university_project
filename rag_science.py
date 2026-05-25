@@ -26,7 +26,9 @@ MMLU_SCIENCE_SUBSETS = [
     "high_school_biology", "high_school_chemistry", "high_school_physics",
     "college_biology",     "college_chemistry",     "college_physics",
     "astronomy", "anatomy", "nutrition", "virology", "medical_genetics",
-    "environmental_science", "conceptual_physics",
+    "environmental_science", "conceptual_physics",     
+    "college_medicine", "clinical_knowledge", "human_aging",
+    "miscellaneous", "global_facts",
 ]
 
 
@@ -44,16 +46,30 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     print("[Science RAG] Building corpus...")
     passages = []
 
-    for item in load_dataset("allenai/sciq", split="train"):
-        s = (item.get("support") or "").strip()
-        if s and len(s.split()) >= 5:
-            passages.append(s)
+    for split in ("train", "validation", "test"):  # era solo "train"
+        for item in load_dataset("allenai/sciq", split=split):
+            s = (item.get("support") or "").strip()
+            if s and len(s.split()) >= 5:
+                passages.append(s)
 
     for split in ("train", "validation", "test"):
         for item in load_dataset("allenai/openbookqa", "additional", split=split):
             f = (item.get("fact1") or "").strip()
             if f:
                 passages.append(f)
+    
+    for arc_config in ("ARC-Challenge", "ARC-Easy"):
+        for split in ("train", "validation", "test"):
+            try:
+                for item in load_dataset("allenai/ai2_arc", arc_config, split=split):
+                    labels = item["choices"]["label"]
+                    texts  = item["choices"]["text"]
+                    key    = item["answerKey"]
+                    if key in labels:
+                        idx = labels.index(key)
+                        passages.append(f"{item['question']} {texts[idx]}.")
+            except Exception as e:
+                print(f"  [Science RAG] Skipping ARC {arc_config}/{split}: {e}")
 
     for subject in MMLU_SCIENCE_SUBSETS:
         try:
@@ -70,6 +86,7 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     _science_passages = unique
     print(f"  {len(_science_passages):,} passages")
 
+    # --- BM25 index for sparse retrieval ---
     _bm25_index = BM25Okapi([p.lower().split() for p in _science_passages])
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
@@ -176,23 +193,23 @@ def rag_science(query: str, option_texts: Optional[list] = None) -> str:
                 "Pass option_texts explicitly."
             )
 
-    print(f"  [Science] stem: {stem!r}")
-    print(f"  [Science] options: {options}")
-
     candidates = multi_query_retrieve(stem, options)
     print(f"  [Science] candidates after multi-query: {len(candidates)}")
 
     top_passages = hybrid_retrieve(stem, candidates, k=5, alpha=0.6)
     print(f"  [Science] passages after hybrid rerank: {len(top_passages)}")
 
-    # Confidence: fraction of stem keywords (4+ chars) present in the top passage
-    stem_kws = {w for w in re.findall(r'[a-z]{4,}', stem.lower())}
-    if top_passages and stem_kws:
-        hits       = sum(1 for kw in stem_kws if kw in top_passages[0].lower())
-        confidence = hits / len(stem_kws) * 100
-        print(f"  [Science] confidence: {confidence:.0f}%  ({hits}/{len(stem_kws)} stem keywords in top passage)")
+    if top_passages:
+        stem_emb    = _science_embedder.encode(
+            [stem], normalize_embeddings=True, convert_to_numpy=True
+        ).astype("float32")
+        passage_emb = _science_embedder.encode(
+            [top_passages[0]], normalize_embeddings=True, convert_to_numpy=True
+        ).astype("float32")
+        confidence = float((stem_emb @ passage_emb.T)[0][0])
+        print(f"  [Science] confidence: {confidence:.3f}  (cosine similarity stem↔top passage)")
         print(f"  [Science] top passage: {top_passages[0][:100].replace(chr(10), ' ')!r}...")
     else:
-        print("  [Science] confidence: 0%  (no passages or no stem keywords)")
+        print("  [Science] confidence: 0.000  (no passages)")
 
     return "\n\n".join(top_passages)
