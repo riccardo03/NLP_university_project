@@ -43,6 +43,13 @@ _PERSON_LABELS = frozenset({
     "person", "actor", "musician", "director", "band",
     "music group", "family member", "historical person",
 })
+_DISAMBIGUATION_PHRASES = (
+    "may refer to:",
+    "most commonly refers to:",
+    "can refer to:",
+    "can mean:",
+    "is a disambiguation",
+)
 
 _QUOTED_RE        = re.compile(r"""['\"''""]([\w][\w\s,.\-&!]{1,58}?)['\"''""]""")
 _PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
@@ -191,7 +198,7 @@ def _wiki_lookup(query: str) -> str:
         if r.status_code != 200: return ""
         text = next(iter(r.json()["query"]["pages"].values())).get("extract", "")
         text = _CITE_RE.sub("", text)
-        return text if "may refer to:" not in text.lower() else ""
+        return text if not any(p in text.lower() for p in _DISAMBIGUATION_PHRASES) else ""
     except Exception:
         return ""
 
