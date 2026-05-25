@@ -115,8 +115,9 @@ SYSTEM_PROMPTS = {
         2. [retrieval: strong] means that option has the most supporting evidence — prefer it unless Wikipedia contradicts it.
         3. [retrieval: weak] means little or no evidence was found for that option.
         4. If evidence is absent or unclear, use your own knowledge.
-        5. For NOT/EXCEPT questions, pick the option with the LEAST supporting evidence.
-        6. Reply with ONLY a single digit: 0, 1, 2 or 3. No explanation. No text."""
+        5. If multiple options seem equally supported, trust WIKIPEDIA over retrieval scores.
+        6. For NOT/EXCEPT questions, pick the option with the LEAST supporting evidence.
+        7. Reply with ONLY a single digit: 0, 1, 2 or 3. No explanation. No text."""
     ),
 
     COMP_HISTORY_POLITICS: (

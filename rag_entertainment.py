@@ -272,15 +272,19 @@ def _snippet_polarity(snippet: str, option: str) -> float:
 def _extract_question_keywords(
     question: str,
     main_term: str,
+    subj_str: str,
     labeled: list[tuple[str, str]],
 ) -> str:
     parts: list[str] = []
     seen:  set[str]  = set()
     main_lower = main_term.lower()
+    subj_lower = subj_str.lower()
 
     def _add(s: str) -> None:
         sl = s.strip().lower()
-        if sl and sl not in seen and sl not in main_lower and main_lower not in sl:
+        if (sl and sl not in seen
+                and sl not in main_lower and main_lower not in sl
+                and sl not in subj_lower and subj_lower not in sl):
             seen.add(sl); parts.append(s.strip())
 
     # Years (always useful context regardless of main_term)
@@ -289,7 +293,7 @@ def _extract_question_keywords(
         if y not in seen:
             seen.add(y); parts.append(y)
 
-    # GLiNER entities from the question, skipping main_term
+    # GLiNER entities from the question, skipping main_term and subj_str
     for text, _ in labeled:
         _add(text)
 
@@ -309,10 +313,11 @@ def _build_queries(
     option_texts: list[str],
     option_entities: list[str],
     main_term: str,
+    subj_str: str,
     labeled: list[tuple[str, str]],
 ) -> list[WeightedQuery]:
     queries: list[WeightedQuery] = []
-    q_kws = _extract_question_keywords(question, main_term, labeled)
+    q_kws = _extract_question_keywords(question, main_term, subj_str, labeled)
     for idx, opt in enumerate(option_texts):
         ent = option_entities[idx] if idx < len(option_entities) else ""
         if ent:
@@ -381,12 +386,19 @@ def _build_llm_prompt(
             lines.append("")
 
     lines.append(f"QUESTION: {question}\n")
+    sorted_votes = sorted(votes, reverse=True)
+    margin       = sorted_votes[0] - sorted_votes[1] if len(sorted_votes) > 1 else 0.0
+
     lines.append("OPTIONS:")
     for i, opt in enumerate(option_texts):
         if not low_confidence:
             rank = rank_map[i]
-            tag = "  [retrieval: strong]" if rank == 0 else (
-                  "  [retrieval: weak]"   if rank == n - 1 else "")
+            if rank == 0 and margin > 5:
+                tag = "  [retrieval: strong]"
+            elif rank == n - 1 and margin > 5:
+                tag = "  [retrieval: weak]"
+            else:
+                tag = ""
         else:
             tag = ""
         lines.append(f"[{i}] {opt}{tag}")
@@ -426,7 +438,7 @@ def rag_entertainment(
     n_opts          = min(len(option_texts), 4)
     option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
     print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
-    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term, labeled)
+    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term, subj_str, labeled)
     print(f"  [ENT] queries={[(q.strategy, q.text) for q in queries]}")
 
     def _safe(fut, default):
