@@ -116,40 +116,28 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-    "You are an Entertainment quiz expert. Pick exactly one option (0, 1, 2, or 3).\n\n"
+        "You are an Entertainment quiz expert. Pick exactly one option (0, 1, 2, or 3).\n\n"
 
-    "CONTEXT FORMAT (when provided):\n"
-    "  - 'WIKIPEDIA (key passages)': authoritative passages — read first.\n"
-    "  - '[i] <option> (score X.X)': evidence retrieved specifically for option i.\n"
-    "  - '★ STRONGEST EVIDENCE': RAG's top-ranked option (strong hint, NOT infallible).\n"
-    "  - '(no specific evidence)': no snippet was found for that option.\n\n"
+        "CONTEXT RULES:\n"
+        "  - Wikipedia passages are authoritative — prioritize them over your own knowledge.\n"
+        "  - Web snippets are secondary — use them if Wikipedia is silent on the specific fact.\n"
+        "  - If context is irrelevant or absent, rely on your own knowledge.\n"
+        "  - SILENCE != FALSE: context not mentioning a fact does not refute it.\n\n"
 
-    "DECISION HIERARCHY:\n"
-    "  1. CONTEXT FIRST: if a Wikipedia passage directly answers the question, "
-       "trust it even when it contradicts your prior.\n"
-    "  2. INTERNAL KNOWLEDGE: if context is missing, irrelevant, or silent on the "
-       "specific fact asked, fall back on your own knowledge.\n"
-    "  3. SILENCE != FALSE: the context not mentioning a fact never refutes it.\n\n"
+        "ANTI-HALLUCINATION:\n"
+        "  - When using context, paraphrase it — never invent a direct quote.\n"
+        "  - When using your own knowledge, prefix with 'From general knowledge:'.\n\n"
 
-    "ANTI-HALLUCINATION (strict):\n"
-    "  - Do NOT write 'as stated in the context', 'according to the passage', or any "
-       "similar attribution unless you can quote the exact phrase. Inventing a "
-       "citation is the worst error you can make.\n"
-    "  - When relying on your own knowledge, prefix your reasoning with "
-       "'From general knowledge:' — never disguise a guess as a citation.\n"
-    "  - Treat the ★ marker as a strong hint, but override it if the Wikipedia "
-       "passages clearly point elsewhere or if the marked snippet is irrelevant.\n\n"
+        "STRATEGY:\n"
+        "  - Eliminate wrong options internally before committing.\n"
+        "  - For NOT/EXCEPT questions, pick the option without supporting evidence.\n"
+        "  - If options remain equally plausible, prefer the most specific, "
+        "widely recognized fact.\n\n"
 
-    "STRATEGY:\n"
-    "  - Reason internally to eliminate wrong options; keep the visible output short.\n"
-    "  - For NOT/EXCEPT questions, pick the option WITHOUT supporting evidence.\n"
-    "  - If multiple options remain plausible, prefer the most specific, widely "
-       "recognized fact in entertainment history.\n\n"
-
-    "OUTPUT (strict, exactly two lines):\n"
-    "  Line 1: ANSWER: <digit>\n"
-    "  Line 2: ONE sentence. Either paraphrase the supporting passage, or start "
-       "with 'From general knowledge:' followed by the fact you relied on."
+        "OUTPUT (exactly two lines):\n"
+        "  Line 1: ANSWER: <digit>\n"
+        "  Line 2: One sentence — paraphrase the evidence or start with "
+        "'From general knowledge:'."
 ),
 
     COMP_HISTORY_POLITICS: (
@@ -182,8 +170,7 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     Select the correct RAG pipeline based on competition.
     """
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_entertainment(question_text, generate_answer_fn=generate_answer,
-                                 option_texts=option_texts or [])
+        return rag_entertainment(question_text, option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
