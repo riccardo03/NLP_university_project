@@ -1,8 +1,10 @@
 """
-Pipeline:
-  1. Extract subjects from the question (named entities / proper nouns).
-  2. Fetch Wikipedia (main subject) + DuckDuckGo (per-option queries) in parallel.
-  3. Assemble deduplicated context and return it for the LLM to reason over.
+Entertainment RAG pipeline.
+
+  1. Extract named entities from the question (GLiNER, regex fallback).
+  2. Fetch up to 2 Wikipedia pages + DuckDuckGo snippets per option in parallel.
+  3. Score options via BM25 + negation-aware polarity.
+  4. Return a structured evidence block for the LLM to reason over.
 """
 
 import re
@@ -10,25 +12,32 @@ import concurrent.futures
 import urllib.parse
 import requests
 from functools import lru_cache
+from rank_bm25 import BM25Okapi
 
 _WIKI_UA = "QuizBot/1.0 (research)"
 _TIMEOUT = 4
 
-_STOP_WORDS = {
+# Pure linguistic noise — stop in both keyword extraction and query cleaning.
+_STOP_WORDS_BASE: frozenset[str] = frozenset({
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
     "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
     "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
     "has", "have", "had", "will", "would", "could", "should", "can", "may",
     "this", "that", "these", "those", "their", "there", "according", "following",
-    "describes", "describe", "best", "most", "called", "named", "own",
-    "film", "movie", "song", "show", "album", "band", "role", "character",
-    "single", "track", "series", "actor", "actress", "director", "article",
-}
+    "describes", "describe", "best", "most", "called", "named", "own", "article",
+})
 
-_STOP_WORDS_QUERY = _STOP_WORDS - {
+# Domain terms: meaningful in search queries but too generic for keyword extraction.
+_DOMAIN_TERMS: frozenset[str] = frozenset({
     "film", "movie", "song", "show", "album", "band", "role",
     "character", "single", "track", "series", "actor", "actress", "director",
-}
+})
+
+# Used by _keywords() — suppresses domain terms so entity names dominate.
+_STOP_WORDS: frozenset[str] = _STOP_WORDS_BASE | _DOMAIN_TERMS
+
+# Used by _clean_query_text() — keeps domain terms so queries stay specific.
+_STOP_WORDS_QUERY: frozenset[str] = _STOP_WORDS_BASE
 
 _GLINER_MODEL_NAME = "urchade/gliner_medium-v2.1"
 _GLINER_LABELS = [
@@ -38,7 +47,7 @@ _GLINER_LABELS = [
     "album", "song",
     "character",
 ]
-# Lower index = higher priority as Wikipedia search anchor
+# Lower index = higher priority as Wikipedia search anchor.
 _GLINER_LABEL_PRIORITY: dict[str, int] = {
     "movie": 0, "film": 0, "TV show": 0, "TV series": 0,
     "album": 1, "song": 1,
@@ -49,24 +58,32 @@ _GLINER_LABEL_PRIORITY: dict[str, int] = {
 _TITLE_LABELS  = frozenset({"movie", "film", "TV show", "TV series"})
 _PERSON_LABELS = frozenset({"person", "actor", "musician", "director", "band", "music group"})
 
-_QUOTED_RE        = re.compile(r"""['\"‘’“”]([\w][\w\s,.\-&!]{1,58}?)['\"‘’“”]""")
+_QUOTED_RE        = re.compile(r"""['\"''“”]([\w][\w\s,.\-&!]{1,58}?)['\"''“”]""")
 _PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
 _PROPER_SINGLE_RE = re.compile(r'^[A-ZÀ-Ý][a-zA-ZÀ-ÿ]{2,}$')
 _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
 
-# GLiNER singleton — populated by setup_entertainment_rag()
+_NOT_EXCEPT_RE = re.compile(
+    r'\b(NOT|EXCEPT|least|never|false|incorrect|wrong)\b',
+    re.IGNORECASE,
+)
+
+# Individual tokens (post-_tokenize) that carry negation signal.
+# Contracted forms like "didn't" tokenize to ["didn", "t"] and are excluded.
+_NEGATION_TOKENS: frozenset[str] = frozenset({
+    "not", "never", "no", "nor", "neither",
+    "denied", "failed", "refused", "unrelated", "unconnected",
+})
+
+# GLiNER singleton — populated by setup_entertainment_rag().
 _gliner_model: object = None
-
-
-def _get_gliner_model():
-    return _gliner_model
 
 
 def setup_entertainment_rag() -> None:
     global _gliner_model
-    print("  [RAG-Entertainment] Loading GLiNER model…")
+    print("  [RAG-Entertainment] Loading GLiNER model...")
     try:
         from gliner import GLiNER
         _gliner_model = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
@@ -117,11 +134,10 @@ def _extract_subjects_regex(question: str) -> list[str]:
 
 def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
     """Returns [(text, label), ...] sorted by label priority, deduped."""
-    model = _get_gliner_model()
-    if model is None:
+    if _gliner_model is None:
         return []
     try:
-        entities = model.predict_entities(question, _GLINER_LABELS, threshold=0.5)
+        entities = _gliner_model.predict_entities(question, _GLINER_LABELS, threshold=0.5)
         entities.sort(key=lambda e: (_GLINER_LABEL_PRIORITY.get(e["label"], 99), e["start"]))
         seen: set[str] = set()
         result: list[tuple[str, str]] = []
@@ -136,15 +152,10 @@ def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
         return []
 
 
-_NOT_EXCEPT_RE = re.compile(
-    r'\b(NOT|EXCEPT|least|never|false|incorrect|wrong)\b',
-    re.IGNORECASE,
-)
-
-
 def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
     persons = [(t, l) for t, l in labeled if l in _PERSON_LABELS]
     titles  = [(t, l) for t, l in labeled if l in _TITLE_LABELS]
+    # When multiple titles exist, the person is a better disambiguation anchor.
     if persons and len(titles) > 1:
         return persons[0][0]
     for preferred in (_TITLE_LABELS, _PERSON_LABELS):
@@ -152,6 +163,26 @@ def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
             if label in preferred:
                 return text
     return labeled[0][0] if labeled else ""
+
+
+def _pick_wiki_anchors(labeled: list[tuple[str, str]]) -> list[str]:
+    """Returns 1-2 Wikipedia search terms: prefer one TITLE + one PERSON entity."""
+    titles  = [t for t, l in labeled if l in _TITLE_LABELS]
+    persons = [t for t, l in labeled if l in _PERSON_LABELS]
+
+    anchors: list[str] = []
+    if titles:
+        anchors.append(titles[0])
+    if persons:
+        anchors.append(persons[0])
+
+    if len(anchors) < 2 and labeled:
+        for text, _ in labeled:
+            if text not in anchors:
+                anchors.append(text)
+                break
+
+    return anchors[:2]
 
 
 @lru_cache(maxsize=64)
@@ -213,47 +244,168 @@ def _wiki_relevant_passages(wiki_text: str, question: str, max_chars: int = 1500
     for score, p in scored:
         if score < 2 or budget <= 100:
             break
-        snippet = p if len(p) <= budget else p[:budget].rsplit(" ", 1)[0] + "…"
+        snippet = p if len(p) <= budget else p[:budget].rsplit(" ", 1)[0] + "..."
         out.append(snippet)
         budget -= len(snippet) + 2
 
     return "\n\n".join(out)
 
 
+def _fetch_multi_wiki(anchors: list[str], question: str, max_chars: int = 600) -> str:
+    """Fetch up to 2 Wikipedia pages concurrently, tagged with [WIKI: title] headers."""
+    if not anchors:
+        return ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futs = {pool.submit(_wiki_lookup, a): a for a in anchors}
+        results: dict[str, str] = {}
+        for fut, anchor in futs.items():
+            try:
+                results[anchor] = fut.result(timeout=_TIMEOUT + 1)
+            except Exception:
+                results[anchor] = ""
+
+    parts = []
+    for anchor in anchors:
+        raw = results.get(anchor, "")
+        if not raw:
+            continue
+        passage = _wiki_relevant_passages(raw, question, max_chars=max_chars)
+        if passage:
+            parts.append(f"[WIKI: {anchor}]\n{passage}")
+
+    return "\n\n".join(parts)
+
+
 @lru_cache(maxsize=128)
-def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
+def _ddg_lookup(query: str, max_results: int = 2) -> tuple[str, ...]:
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
-            out = []
+            out: list[str] = []
             for r in ddgs.text(query, max_results=max_results, timeout=_TIMEOUT):
                 body  = r.get("body", "")
                 title = r.get("title", "")
                 if body and len(body) >= 60:
                     out.append(f"{title}. {body}" if title else body)
-            return out
+            return tuple(out)
     except Exception as e:
         print(f"  [RAG] DDG error: {e}")
+        return ()
+
+
+def _bm25_rank(corpus: list[str], query: str, top_k: int = 3) -> list[tuple[float, str]]:
+    if not corpus:
         return []
+    tokenized = [_tokenize(doc) for doc in corpus]
+    bm25 = BM25Okapi(tokenized)
+    scores = bm25.get_scores(_tokenize(query))
+    ranked = sorted(zip(scores, corpus), reverse=True)
+    return ranked[:top_k]
 
 
-def _vote(option_texts: list, opt_snips: list[list[str]], subj_str: str) -> list[float]:
-    votes = [0.0] * len(option_texts)
+def _snippet_polarity(snippet: str, option: str) -> float:
+    """Returns -1.0 if a negation token appears within 8 positions of an option keyword, else +1.0."""
+    tokens  = _tokenize(snippet)
+    opt_kws = _keywords(option)
+    for i, tok in enumerate(tokens):
+        if tok in opt_kws:
+            window = tokens[max(0, i - 8): i + 8]
+            if any(w in _NEGATION_TOKENS for w in window):
+                return -1.0
+    return 1.0
+
+
+def _vote(
+    option_texts: list[str],
+    opt_snips: list[tuple[str, ...]],
+    subj_str: str,
+    question: str,
+) -> list[float]:
+    votes    = [0.0] * len(option_texts)
     subj_kws = _keywords(subj_str)
-    for i, snips in enumerate(opt_snips):
-        opt_kws = _keywords(option_texts[i])
-        for snip in snips:
-            tokens = set(_tokenize(snip))
-            opt_hits  = len(opt_kws  & tokens)
+
+    for i, (opt_text, snips) in enumerate(zip(option_texts, opt_snips)):
+        if not snips:
+            continue
+        ranked = _bm25_rank(list(snips), f"{question} {opt_text}", top_k=3)
+        for bm25_score, snippet in ranked:
+            tokens    = set(_tokenize(snippet))
             subj_hits = len(subj_kws & tokens)
-            if opt_hits > 0 and subj_hits > 0:
-                votes[i] += opt_hits * subj_hits
+            if subj_hits == 0:
+                continue
+            votes[i] += bm25_score * subj_hits * _snippet_polarity(snippet, opt_text)
+
     return votes
 
 
-def rag_entertainment(query: str, num_results: int = 3, option_texts: list = None) -> str:
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    window   = text[:max_chars]
+    last_end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if last_end > max_chars // 2:
+        return window[:last_end + 1]
+    return window.rsplit(" ", 1)[0] + "..."
+
+
+def _best_snippet_for_option(
+    opt_text: str,
+    opt_snips: list[tuple[str, ...]],
+    question: str,
+    opt_idx: int,
+) -> str:
+    snips = opt_snips[opt_idx] if opt_idx < len(opt_snips) else ()
+    if not snips:
+        return ""
+    ranked = _bm25_rank(list(snips), f"{question} {opt_text}", top_k=1)
+    return ranked[0][1] if ranked else ""
+
+
+def _build_llm_prompt(
+    question: str,
+    option_texts: list[str],
+    wiki_text: str,
+    opt_snips: list[tuple[str, ...]],
+    votes: list[float],
+    is_negative: bool,
+) -> str:
+    lines: list[str] = []
+
+    if is_negative:
+        lines.append(
+            "[NEGATIVE QUESTION: This asks what is NOT true / EXCEPT. "
+            "Choose the option with the LEAST supporting evidence.]"
+        )
+
+    if wiki_text:
+        lines.append(f"-- WIKIPEDIA --\n{wiki_text}")
+
+    lines.append("-- EVIDENCE PER OPTION --")
+
+    n           = len(option_texts)
+    ranked_opts = sorted(range(n), key=lambda i: votes[i], reverse=not is_negative)
+
+    for i, opt_text in enumerate(option_texts):
+        rank_pos = ranked_opts.index(i) + 1
+        hint     = "strongest evidence" if rank_pos == 1 else f"rank {rank_pos}"
+        lines.append(f"\n[Option {i}] {opt_text}  ({hint}, score={votes[i]:.2f})")
+        snip = _best_snippet_for_option(opt_text, opt_snips, question, i)
+        if snip:
+            lines.append(f"  Evidence: {_truncate_at_sentence(snip, 250)}")
+        else:
+            lines.append("  Evidence: (none retrieved)")
+
+    return "\n".join(lines)
+
+
+def rag_entertainment(
+    query: str,
+    num_results: int = 3,
+    option_texts: list[str] | None = None,
+) -> str:
     all_text = query + " " + " ".join(option_texts or [])
-    labeled = _extract_subjects_gliner(all_text)
+    labeled  = _extract_subjects_gliner(all_text)
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = _pick_main_term(labeled)
@@ -268,14 +420,15 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
         main_term = " ".join(kws[:4]) if kws else query[:60]
 
     subj_str = " ".join(subjects[:2]) if subjects else main_term
-    print(f"  [ENT] main_term={main_term!r}  subj_str={subj_str!r}")
+    anchors  = _pick_wiki_anchors(labeled) if labeled else [main_term]
+    print(f"  [ENT] main_term={main_term!r}  subj_str={subj_str!r}  anchors={anchors}")
 
     if not option_texts:
-        wiki = _wiki_relevant_passages(_wiki_lookup(main_term), query, max_chars=1200)
+        wiki = _fetch_multi_wiki(anchors, query, max_chars=1200)
         ddg  = _ddg_lookup(subj_str, num_results)
         return "\n\n".join(filter(None, [wiki, *ddg]))[:1500]
 
-    n_opts = min(len(option_texts), 4)
+    n_opts       = min(len(option_texts), 4)
     cand_queries = [
         f"{subj_str} {option_texts[i]}".strip()[:120]
         for i in range(n_opts)
@@ -289,47 +442,28 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
             return default
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 1) as pool:
-        wiki_fut = pool.submit(_wiki_lookup, main_term)
-        opt_futs = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
-        wiki_full = _safe(wiki_fut, "")
-        opt_snips = [_safe(f, []) for f in opt_futs]
+        wiki_fut  = pool.submit(_fetch_multi_wiki, anchors, query, 600)
+        opt_futs  = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
+        wiki_text = _safe(wiki_fut, "")
+        opt_snips = [_safe(f, ()) for f in opt_futs]
 
-    print(f"  [ENT] wiki chars={len(wiki_full)}  snips per opt={[len(s) for s in opt_snips]}")
+    print(f"  [ENT] wiki chars={len(wiki_text)}  snips per opt={[len(s) for s in opt_snips]}")
 
     has_title_entity = any(label in _TITLE_LABELS for _, label in labeled)
-    if not has_title_entity and not wiki_full:
-        print("  [ENT] Low confidence → LLM fallback")
+    if not has_title_entity and not wiki_text:
+        print("  [ENT] Low confidence -> LLM fallback")
         return ""
 
-    wiki_text   = _wiki_relevant_passages(wiki_full, query, max_chars=800)
-    votes       = _vote(option_texts[:n_opts], opt_snips, subj_str)
+    votes       = _vote(option_texts[:n_opts], opt_snips, subj_str, query)
     is_negative = bool(_NOT_EXCEPT_RE.search(query))
-    if is_negative:
-        winner     = min(range(n_opts), key=lambda i: votes[i])
-        ev_marker  = " ← LEAST EVIDENCE (NOT/EXCEPT question)"
-    else:
-        winner     = max(range(n_opts), key=lambda i: votes[i])
-        ev_marker  = " ← STRONGEST EVIDENCE"
+    winner      = (min if is_negative else max)(range(n_opts), key=lambda i: votes[i])
     print(f"  [ENT] votes={votes}  is_negative={is_negative}  winner=[{winner}]")
 
-    parts = []
-    if is_negative:
-        parts.append("[NOTE: This is a NOT/EXCEPT question. "
-                     "Pick the option with the LEAST supporting evidence.]")
-    if wiki_text:
-        parts.append(f"WIKIPEDIA:\n{wiki_text}")
-
-    seen_key: set[str] = set()
-    for i, snips in enumerate(opt_snips):
-        marker = ev_marker if i == winner and votes[winner] > 0 else ""
-        label  = f"[{i}] {option_texts[i]}{marker}"
-        for s in snips:
-            k = s[:120]
-            if k not in seen_key:
-                seen_key.add(k)
-                parts.append(f"{label}:\n{s[:300]}")
-                break
-        else:
-            parts.append(f"{label}: (no evidence)")
-
-    return "\n\n".join(parts)[:1200]
+    return _build_llm_prompt(
+        question=query,
+        option_texts=list(option_texts[:n_opts]),
+        wiki_text=wiki_text,
+        opt_snips=opt_snips,
+        votes=votes,
+        is_negative=is_negative,
+    )

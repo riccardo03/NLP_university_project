@@ -1,7 +1,3 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 1 · Imports and constants
-# ─────────────────────────────────────────────────────────────────────────────
-
 import re
 import time
 import warnings
@@ -11,10 +7,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, 
 from transformers import logging as transformers_logging
 
 from rag_entertainment import rag_entertainment
-from rag_history      import rag_history
-from rag_science      import rag_science
-from rag_maths        import rag_maths
-from typing import Optional
+from rag_history        import rag_history
+from rag_science        import rag_science
+from rag_maths          import rag_maths
 
 warnings.filterwarnings("ignore")
 transformers_logging.set_verbosity_error()
@@ -38,12 +33,10 @@ _MAX_TOKENS = {
     COMP_MATHS:            40,
 }
 
+_model     = None
+_tokenizer = None
+_pipe      = None
 
-# (Science RAG moved back to rag_science.py)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 2 · Model loading
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
@@ -53,22 +46,20 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         model_name,
         device_map="auto",
         torch_dtype=torch.float16,
-        trust_remote_code=True,
+        trust_remote_code=True,  # required for Qwen
     )
     _model.config.max_length = None
     _model.generation_config = GenerationConfig(
-         pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
-         eos_token_id=_tokenizer.eos_token_id,
+        pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
+        eos_token_id=_tokenizer.eos_token_id,
     )
     _pipe = pipeline(
         "text-generation",
         model=_model,
         tokenizer=_tokenizer,
     )
-
     print("The model is ready to answer.")
-    warmup_models()
-    # Initialize science RAG now that the model and environment are ready.
+
     try:
         import rag_science
         rag_science.setup_science_rag()
@@ -96,13 +87,11 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    do_sample   = True
-    temperature = 0.1
     outputs = _pipe(
         messages,
         max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        temperature=temperature,
+        do_sample=True,
+        temperature=0.1,
     )
 
     result = outputs[0]["generated_text"]
@@ -111,28 +100,16 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
     return result[-1]["content"].strip()
 
 
-def warmup_models() -> None:
-    """No-op: cross-encoder removed, no models require pre-loading."""
-    print("  [Warmup] All models ready (no pre-loading required).")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 3 · System prompt templates
-# ─────────────────────────────────────────────────────────────────────────────
-
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
         "You are an entertainment expert answering a multiple choice question. "
-        "Context is provided to help, but may be incomplete or misleading. "
-        "Use context when it clearly supports an answer. "
-        "If context is weak, irrelevant, or contradicts your knowledge, "
-        "rely on your own expertise instead. "
-        "The '← MOST RETRIEVED' marker is a keyword hint, not a reliable answer — "
-        "override it freely. "
-        "For NOT/EXCEPT questions, pick the option with the least supporting evidence. "
+        "Context is provided showing retrieved evidence per option with confidence scores. "
+        "Use the evidence when it clearly supports an answer; rely on your own expertise "
+        "when evidence is weak, absent, or contradicts your knowledge. "
+        "For NOT/EXCEPT questions, pick the option with the LEAST supporting evidence. "
         "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
         "Then one sentence explaining why."
-),
+    ),
 
     COMP_HISTORY_POLITICS: (
         "You are a history and politics expert answering a multiple choice question. "
@@ -155,14 +132,7 @@ SYSTEM_PROMPTS = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 4 · RAG dispatcher
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_context(comp_id: int, question_text: str, option_texts: list = None) -> str:
-    """
-    Select the correct RAG pipeline based on competition.
-    """
+def get_context(comp_id: int, question_text: str, option_texts: list[str] | None = None) -> str:
     if comp_id == COMP_ENTERTAINMENT:
         return rag_entertainment(question_text, option_texts=option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
@@ -174,17 +144,10 @@ def get_context(comp_id: int, question_text: str, option_texts: list = None) -> 
     return ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 5 · Answer extraction
-# ─────────────────────────────────────────────────────────────────────────────
-
 _LETTER_MAP = {"a": 0, "b": 1, "c": 2, "d": 3}
 
 
 def extract_answer_id(text: str, num_options: int = 4) -> int:
-    """
-    Robust extraction of a digit answer from model output.
-    """
     # Priority 0: explicit structured tag "ANSWER: X"
     tag_match = re.search(r"\bANSWER\s*:\s*([0-3])\b", text, re.I)
     if tag_match:
@@ -193,34 +156,24 @@ def extract_answer_id(text: str, num_options: int = 4) -> int:
             return idx
 
     # Priority 1: standalone digit within valid range
-    digit_matches = re.findall(r"\b([0-3])\b", text)
-    for m in digit_matches:
+    for m in re.findall(r"\b([0-3])\b", text):
         idx = int(m)
         if idx < num_options:
             return idx
 
     # Priority 2: A/B/C/D letter mapping
-    letter_matches = re.findall(r"\b([A-Da-d])\b", text)
-    for m in letter_matches:
+    for m in re.findall(r"\b([A-Da-d])\b", text):
         idx = _LETTER_MAP.get(m.lower(), -1)
         if 0 <= idx < num_options:
             return idx
 
-    # default answer 0
     print("Defaulting to 0")
     return 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 6 · Prompt builder
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_user_prompt(question_text: str, options: list, context: str) -> str:
-    """
-    Assemble the user-facing prompt with context, question, and options.
-    """
     options_str = "\n".join(f"  [{opt.id}] {opt.text}" for opt in options)
-    ctx_block = f"Context:\n{context}\n\n" if context.strip() else ""
+    ctx_block   = f"Context:\n{context}\n\n" if context.strip() else ""
     return (
         f"{ctx_block}"
         f"Question: {question_text}\n\n"
@@ -232,24 +185,16 @@ def build_user_prompt(question_text: str, options: list, context: str) -> str:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 7 · Game loop
-# ─────────────────────────────────────────────────────────────────────────────
-
 def play_game(game, comp_id: int) -> dict:
-    """
-    Play a full game session, one question at a time.
-    Returns a structured evaluation log.
-    """
-    comp_name = COMP_NAMES.get(comp_id, f"Competition {comp_id}")
+    comp_name     = COMP_NAMES.get(comp_id, f"Competition {comp_id}")
     system_prompt = SYSTEM_PROMPTS[comp_id]
 
     log = {
-        "competition": comp_id,
+        "competition":      comp_id,
         "competition_name": comp_name,
-        "level_reached": 0,
-        "earnings": 0.0,
-        "questions": [],
+        "level_reached":    0,
+        "earnings":         0.0,
+        "questions":        [],
     }
 
     print(f"\n{'='*60}")
@@ -259,10 +204,10 @@ def play_game(game, comp_id: int) -> dict:
     while game.in_progress:
         question = game.current_question
         if not question:
-            print("No question available — ended, the game has.")
+            print("No question available — game ended.")
             break
 
-        level = game.current_level
+        level     = game.current_level
         time_left = game.time_remaining or 30.0
 
         print(f"\n--- Level {level} | Time: {time_left:.1f}s ---")
@@ -272,40 +217,27 @@ def play_game(game, comp_id: int) -> dict:
 
         option_texts = [opt.text for opt in question.options]
 
-        # Retrieve context from the appropriate RAG tool
         print("  [RAG] Searching for context...")
-        t0 = time.time()
+        t0      = time.time()
         context = get_context(comp_id, question.text, option_texts)
-        rag_elapsed = time.time() - t0
+        print(f"  [RAG] Done in {time.time() - t0:.1f}s. Context: {context[:120].replace(chr(10), ' ')}...")
 
-        snippet = context[:120].replace("\n", " ") if context else "(none)"
-        print(f"  [RAG] Done in {rag_elapsed:.1f}s. Context: {snippet}...")
-
-        # Build prompt and generate answer
         user_prompt = build_user_prompt(question.text, question.options, context)
         print("  [LLM] Thinking...")
-        t1 = time.time()
-        max_tokens = _MAX_TOKENS[comp_id]
+        t1         = time.time()
+        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=_MAX_TOKENS[comp_id])
+        answer_id  = extract_answer_id(raw_output, num_options=len(question.options))
+        print(f"  [LLM] Output: '{raw_output}' -> Answer ID: {answer_id} (in {time.time() - t1:.1f}s)")
 
-        raw_output = generate_answer(system_prompt, user_prompt, max_new_tokens=max_tokens)
-        answer_id = extract_answer_id(raw_output, num_options=len(question.options))
-
-        # Self-consistency disabled — model is too slow (~2 tok/s) for 3 LLM calls in 30s
-
-        llm_elapsed = time.time() - t1
-        print(f"  [LLM] Output: '{raw_output}' → Answer ID: {answer_id} (in {llm_elapsed:.1f}s)")
-
-        # Record question before submitting
         q_record = {
-            "level": level,
-            "question": question.text,
-            "options": [{"id": o.id, "text": o.text} for o in question.options],
+            "level":        level,
+            "question":     question.text,
+            "options":      [{"id": o.id, "text": o.text} for o in question.options],
             "model_answer": answer_id,
-            "correct": None,
-            "timed_out": False,
+            "correct":      None,
+            "timed_out":    False,
         }
 
-        # Submit the answer
         result = game.answer(answer_id)
 
         q_record["correct"]   = result.correct
@@ -313,18 +245,18 @@ def play_game(game, comp_id: int) -> dict:
         log["questions"].append(q_record)
 
         if result.timed_out:
-            print("  ⏰ TIMED OUT! We could not move on.")
+            print("  TIMED OUT!")
             log["level_reached"] = level
             log["earnings"]      = result.earned_amount
             break
         elif result.correct:
-            print(f"  ✓ CORRECT! Earned so far: ${result.earned_amount:,.2f}")
+            print(f"  CORRECT! Earned so far: ${result.earned_amount:,.2f}")
             log["level_reached"] = level
             log["earnings"]      = result.earned_amount
             if result.game_over:
-                print(f"\n  🏆 GAME COMPLETE! All questions answered!")
+                print("  GAME COMPLETE! All questions answered!")
         else:
-            print(f"  ✗ WRONG! Game over. Earned: ${result.earned_amount:,.2f}")
+            print(f"  WRONG! Game over. Earned: ${result.earned_amount:,.2f}")
             log["level_reached"] = level
             log["earnings"]      = result.earned_amount
             break
@@ -336,14 +268,7 @@ def play_game(game, comp_id: int) -> dict:
     return log
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 8 · Evaluation
-# ─────────────────────────────────────────────────────────────────────────────
-
 def print_evaluation(log: dict) -> None:
-    """
-    Print a clear summary of a completed game.
-    """
     comp_name = log.get("competition_name", f"Competition {log['competition']}")
     questions = log.get("questions", [])
 
@@ -363,27 +288,23 @@ def print_evaluation(log: dict) -> None:
     print(f"  Accuracy      : {accuracy:.1%}")
     print(f"{'─'*50}")
 
-    # Per-question breakdown
     for i, q in enumerate(questions, 1):
-        status = "✓" if q.get("correct") else ("⏰" if q.get("timed_out") else "✗")
+        status = "OK" if q.get("correct") else ("TO" if q.get("timed_out") else "XX")
         ans_id = q.get("model_answer", "?")
         chosen = next(
             (o["text"] for o in q.get("options", []) if o["id"] == ans_id),
             str(ans_id),
         )
-        print(f"  [{status}] L{q['level']}: {q['question'][:60]}... → [{ans_id}] {chosen[:30]}")
+        print(f"  [{status}] L{q['level']}: {q['question'][:60]}... -> [{ans_id}] {chosen[:30]}")
     print()
 
 
 def print_all_evaluations(logs: list) -> None:
-    """
-    Summarize all games across all competitions.
-    """
-    print("\n" + "═" * 60)
+    print("\n" + "=" * 60)
     print("  OVERALL SUMMARY — PoliMillionaire Bot")
-    print("═" * 60)
+    print("=" * 60)
 
-    total_correct = 0
+    total_correct   = 0
     total_questions = 0
 
     for log in logs:
@@ -404,4 +325,4 @@ def print_all_evaluations(logs: list) -> None:
     overall = total_correct / total_questions if total_questions > 0 else 0.0
     print(f"{'─'*60}")
     print(f"  Overall accuracy: {overall:.1%}  ({total_correct}/{total_questions} correct)")
-    print("═" * 60 + "\n")
+    print("=" * 60 + "\n")
