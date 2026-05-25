@@ -122,28 +122,12 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are an Entertainment quiz expert. Pick exactly one option (0, 1, 2, or 3).\n\n"
-
-        "CONTEXT RULES:\n"
-        "  - Wikipedia passages are authoritative — prioritize them over your own knowledge.\n"
-        "  - Web snippets are secondary — use them if Wikipedia is silent on the specific fact.\n"
-        "  - If context is irrelevant or absent, rely on your own knowledge.\n"
-        "  - SILENCE != FALSE: context not mentioning a fact does not refute it.\n\n"
-
-        "ANTI-HALLUCINATION:\n"
-        "  - When using context, paraphrase it — never invent a direct quote.\n"
-        "  - When using your own knowledge, prefix with 'From general knowledge:'.\n\n"
-
-        "STRATEGY:\n"
-        "  - Eliminate wrong options internally before committing.\n"
-        "  - For NOT/EXCEPT questions, pick the option without supporting evidence.\n"
-        "  - If options remain equally plausible, prefer the most specific, "
-        "widely recognized fact.\n\n"
-
-        "OUTPUT (exactly two lines):\n"
-        "  Line 1: ANSWER: <digit>\n"
-        "  Line 2: One sentence — paraphrase the evidence or start with "
-        "'From general knowledge:'."
+        "You are a entertainment expert answering a multiple choice question. "
+        "ALWAYS prioritize the provided context over your own knowledge. "
+        "If the context contains the answer, use it — do not override it with general reasoning. "
+        "For questions asking about 'primary', 'main', or 'direct' cause/reason, choose the most proximate cause, not the most famous one. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why, referencing the context."
 ),
 
     COMP_HISTORY_POLITICS: (
