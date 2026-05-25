@@ -136,8 +136,17 @@ def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
         return []
 
 
+_NOT_EXCEPT_RE = re.compile(
+    r'\b(NOT|EXCEPT|least|never|false|incorrect|wrong)\b',
+    re.IGNORECASE,
+)
+
+
 def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
-    """Title entities first, then person/band, then first entity."""
+    persons = [(t, l) for t, l in labeled if l in _PERSON_LABELS]
+    titles  = [(t, l) for t, l in labeled if l in _TITLE_LABELS]
+    if persons and len(titles) > 1:
+        return persons[0][0]
     for preferred in (_TITLE_LABELS, _PERSON_LABELS):
         for text, label in labeled:
             if label in preferred:
@@ -292,18 +301,27 @@ def rag_entertainment(query: str, num_results: int = 3, option_texts: list = Non
         print("  [ENT] Low confidence → LLM fallback")
         return ""
 
-    wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=800)
-    votes  = _vote(option_texts[:n_opts], opt_snips, subj_str)
-    winner = max(range(n_opts), key=lambda i: votes[i])
-    print(f"  [ENT] votes={votes}  winner=[{winner}]")
+    wiki_text   = _wiki_relevant_passages(wiki_full, query, max_chars=800)
+    votes       = _vote(option_texts[:n_opts], opt_snips, subj_str)
+    is_negative = bool(_NOT_EXCEPT_RE.search(query))
+    if is_negative:
+        winner     = min(range(n_opts), key=lambda i: votes[i])
+        ev_marker  = " ← LEAST EVIDENCE (NOT/EXCEPT question)"
+    else:
+        winner     = max(range(n_opts), key=lambda i: votes[i])
+        ev_marker  = " ← STRONGEST EVIDENCE"
+    print(f"  [ENT] votes={votes}  is_negative={is_negative}  winner=[{winner}]")
 
     parts = []
+    if is_negative:
+        parts.append("[NOTE: This is a NOT/EXCEPT question. "
+                     "Pick the option with the LEAST supporting evidence.]")
     if wiki_text:
         parts.append(f"WIKIPEDIA:\n{wiki_text}")
 
     seen_key: set[str] = set()
     for i, snips in enumerate(opt_snips):
-        marker = " ← STRONGEST EVIDENCE" if i == winner and votes[winner] > 0 else ""
+        marker = ev_marker if i == winner and votes[winner] > 0 else ""
         label  = f"[{i}] {option_texts[i]}{marker}"
         for s in snips:
             k = s[:120]

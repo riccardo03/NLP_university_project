@@ -122,12 +122,16 @@ def warmup_models() -> None:
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are a entertainment expert answering a multiple choice question. "
-        "ALWAYS prioritize the provided context over your own knowledge. "
-        "If the context contains the answer, use it — do not override it with general reasoning. "
-        "For questions asking about 'primary', 'main', or 'direct' cause/reason, choose the most proximate cause, not the most famous one. "
+        "You are an entertainment expert answering a multiple choice question. "
+        "Context is provided to help, but may be incomplete or misleading. "
+        "Use context when it clearly supports an answer. "
+        "If context is weak, irrelevant, or contradicts your knowledge, "
+        "rely on your own expertise instead. "
+        "The '← MOST RETRIEVED' marker is a keyword hint, not a reliable answer — "
+        "override it freely. "
+        "For NOT/EXCEPT questions, pick the option with the least supporting evidence. "
         "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
-        "Then one sentence explaining why, referencing the context."
+        "Then one sentence explaining why."
 ),
 
     COMP_HISTORY_POLITICS: (
