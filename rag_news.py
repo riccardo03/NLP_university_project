@@ -1,0 +1,263 @@
+"""
+News RAG: date-anchored DDG search → article fetch → LLM prompt.
+
+No Wikipedia. No BM25 voting. No caching (news changes daily).
+Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
+"""
+
+import html as _html_module
+import re
+
+import requests
+
+_TIMEOUT           = 5
+_ARTICLE_MAX_CHARS = 3000
+_MAX_DDG_RESULTS   = 3
+
+_STOP_WORDS_NEWS: frozenset[str] = frozenset({
+    "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
+    "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
+    "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
+    "has", "have", "had", "will", "would", "could", "should", "can", "may",
+    "this", "that", "these", "those", "their", "there", "according", "following",
+    "describes", "describe", "best", "most", "called", "named", "article",
+    "published", "reported", "stated", "said",
+})
+
+_MONTH_FULL: list[str] = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+_MONTH_TO_FULL: dict[str, str] = {
+    **{m.lower(): m for m in _MONTH_FULL},
+    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+    "jun": "June",    "jul": "July",     "aug": "August",
+    "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+}
+# Longest keys first so alternation in regex never short-circuits on abbreviations
+_MONTH_PAT: str = "|".join(
+    sorted(_MONTH_TO_FULL.keys(), key=len, reverse=True)
+)
+
+_DATE_ISO_RE = re.compile(r'\b((?:19|20)\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b')
+_DATE_MDY_RE = re.compile(
+    rf'\b({_MONTH_PAT})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{{2}})\b',
+    re.IGNORECASE,
+)
+_DATE_DMY_RE = re.compile(
+    rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_PAT})\s+((?:19|20)\d{{2}})\b',
+    re.IGNORECASE,
+)
+_DATE_MY_RE = re.compile(
+    rf'\b({_MONTH_PAT})\s+((?:19|20)\d{{2}})\b',
+    re.IGNORECASE,
+)
+
+_TOKEN_RE     = re.compile(r'[a-zA-ZÀ-ÿ0-9]+')
+# Remove script/style/nav/header/footer blocks before tag stripping
+_BLOCK_TAG_RE = re.compile(
+    r'<(script|style|nav|header|footer|aside|noscript)[^>]*>.*?</\1>',
+    re.DOTALL | re.IGNORECASE,
+)
+_TAG_RE = re.compile(r'<[^>]+>')
+_WS_RE  = re.compile(r'\s+')
+
+
+# ---------------------------------------------------------------------------
+# Date extraction
+# ---------------------------------------------------------------------------
+
+def _extract_date(text: str) -> tuple[str, str]:
+    """
+    Returns (raw_date, alt_date).
+    raw_date: exactly as it appears in the text.
+    alt_date: human-readable reformatted version (e.g. "May 18 2026").
+    Both empty strings when no date is found.
+    """
+    m = _DATE_ISO_RE.search(text)
+    if m:
+        year, mon = m.group(1), int(m.group(2))
+        day  = int(m.group(3))
+        return m.group(0), f"{_MONTH_FULL[mon - 1]} {day} {year}"
+
+    m = _DATE_MDY_RE.search(text)
+    if m:
+        month_full = _MONTH_TO_FULL.get(m.group(1).lower(), m.group(1).capitalize())
+        return m.group(0), f"{month_full} {m.group(2)} {m.group(3)}"
+
+    m = _DATE_DMY_RE.search(text)
+    if m:
+        month_full = _MONTH_TO_FULL.get(m.group(2).lower(), m.group(2).capitalize())
+        return m.group(0), f"{month_full} {m.group(1)} {m.group(3)}"
+
+    m = _DATE_MY_RE.search(text)
+    if m:
+        month_full = _MONTH_TO_FULL.get(m.group(1).lower(), m.group(1).capitalize())
+        return m.group(0), f"{month_full} {m.group(2)}"
+
+    return "", ""
+
+
+# ---------------------------------------------------------------------------
+# HTML stripping
+# ---------------------------------------------------------------------------
+
+def _strip_html(raw: str) -> str:
+    text = _BLOCK_TAG_RE.sub(" ", raw)
+    text = _TAG_RE.sub(" ", text)
+    text = _html_module.unescape(text)
+    text = _WS_RE.sub(" ", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# DDG search — no lru_cache (news changes daily)
+# ---------------------------------------------------------------------------
+
+def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[dict]:
+    try:
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                url = r.get("href") or r.get("url", "")
+                if url:
+                    results.append({
+                        "url":   url,
+                        "title": r.get("title", ""),
+                        "body":  r.get("body", ""),
+                    })
+        return results
+    except Exception as e:
+        print(f"  [RAG-News] DDG error: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Article fetching
+# ---------------------------------------------------------------------------
+
+def _fetch_article(url: str) -> str:
+    """Fetch URL, strip HTML, return first _ARTICLE_MAX_CHARS chars of plain text."""
+    try:
+        r = requests.get(
+            url,
+            timeout=_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"},
+        )
+        if r.status_code != 200:
+            return ""
+        return _strip_html(r.text)[:_ARTICLE_MAX_CHARS]
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def setup_news_rag() -> None:
+    """No-op: GLiNER is loaded by setup_entertainment_rag()."""
+    pass
+
+
+def rag_news(query: str, option_texts: list[str] | None = None) -> str:
+    # 1. Date extraction
+    raw_date, alt_date = _extract_date(query)
+    if raw_date:
+        print(f"  [News] date: {raw_date!r}  alt: {alt_date!r}")
+    else:
+        print("  [News] No date found in question")
+
+    # 2. Subject extraction (reuse GLiNER already loaded by entertainment RAG)
+    from rag_entertainment import _extract_subjects_gliner, _extract_subjects_regex
+
+    labeled = _extract_subjects_gliner(query)
+    if labeled:
+        subjects  = [text for text, _ in labeled]
+        main_term = subjects[0]
+        print(f"  [News] GLiNER entities: {labeled}")
+    else:
+        subjects  = _extract_subjects_regex(query)
+        main_term = subjects[0] if subjects else ""
+        print(f"  [News] regex subjects: {subjects}")
+
+    if not main_term:
+        tokens    = _TOKEN_RE.findall(query.lower())
+        main_term = " ".join(
+            t for t in tokens if len(t) >= 4 and t not in _STOP_WORDS_NEWS
+        )[:60]
+
+    # 3. Query building — date anchor in every query
+    opt_kw = ""
+    if option_texts:
+        for opt in option_texts:
+            kws = [
+                t for t in _TOKEN_RE.findall(opt.lower())
+                if len(t) >= 4 and t not in _STOP_WORDS_NEWS
+            ]
+            if kws:
+                opt_kw = kws[0]
+                break
+
+    date_anchor = raw_date or ""
+    alt_anchor  = alt_date if (alt_date and alt_date != raw_date) else ""
+
+    if date_anchor:
+        q1 = f"{main_term} {date_anchor}".strip()
+        q2 = (f"{main_term} {alt_anchor}".strip()
+              if alt_anchor else f"{main_term} {date_anchor} news")
+        q3 = (f"{main_term} {date_anchor} {opt_kw}".strip()
+              if opt_kw else f"{main_term} {date_anchor} article")
+    else:
+        q1 = main_term
+        q2 = f"{main_term} news"
+        q3 = f"{main_term} {opt_kw}".strip() if opt_kw else f"{main_term} latest"
+
+    queries = [q for q in [q1, q2, q3] if q]
+    print(f"  [News] queries: {queries}")
+
+    # 4. Article fetching — stop at first article that contains a question keyword
+    q_keywords = {
+        t for t in _TOKEN_RE.findall(query.lower())
+        if len(t) >= 4 and t not in _STOP_WORDS_NEWS
+    }
+
+    article_text = ""
+    article_url  = ""
+
+    for q_text in queries:
+        if article_text:
+            break
+        for r in _ddg_search(q_text):
+            url = r["url"]
+            text = _fetch_article(url)
+            if not text:
+                continue
+            if any(kw in text.lower() for kw in q_keywords):
+                article_text = text
+                article_url  = url
+                print(f"  [News] article found ({len(text)} chars): {url[:80]}")
+                break
+
+    if not article_text:
+        print("  [News] No article found — LLM fallback")
+        return ""
+
+    # 5. Prompt assembly
+    date_display = raw_date if raw_date else "unknown"
+    lines: list[str] = [
+        f"ARTICLE (source: {article_url}, date: {date_display}):",
+        article_text,
+        "",
+        f"QUESTION: {query}",
+        "",
+    ]
+    if option_texts:
+        lines.append("OPTIONS:")
+        for i, opt in enumerate(option_texts[:4]):
+            lines.append(f"[{i}] {opt}")
+        lines.append("")
+    lines.append("Answer (0/1/2/3):")
+
+    return "\n".join(lines)

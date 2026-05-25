@@ -10,6 +10,7 @@ from rag_entertainment import rag_entertainment
 from rag_history        import rag_history
 from rag_science        import rag_science
 from rag_maths          import rag_maths
+from rag_news           import rag_news
 
 warnings.filterwarnings("ignore")
 transformers_logging.set_verbosity_error()
@@ -18,12 +19,14 @@ COMP_ENTERTAINMENT      = 0
 COMP_HISTORY_POLITICS   = 1
 COMP_SCIENCE_NATURE     = 2
 COMP_MATHS              = 3
+COMP_NEWS               = 4
 
 COMP_NAMES = {
     COMP_ENTERTAINMENT:    "Entertainment",
     COMP_HISTORY_POLITICS: "Ancient History & Politics",
     COMP_SCIENCE_NATURE:   "Science & Nature",
     COMP_MATHS:            "Maths",
+    COMP_NEWS:             "News",
 }
 
 _MAX_TOKENS = {
@@ -31,6 +34,7 @@ _MAX_TOKENS = {
     COMP_HISTORY_POLITICS: 40,
     COMP_SCIENCE_NATURE:   40,
     COMP_MATHS:            40,
+    COMP_NEWS:             40,
 }
 
 _model     = None
@@ -78,6 +82,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: entertainment RAG setup failed: {e}")
 
+    try:
+        import rag_news
+        rag_news.setup_news_rag()
+    except Exception as e:
+        print(f"Warning: news RAG setup failed: {e}")
+
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
     if _pipe is None:
@@ -87,12 +97,24 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    outputs = _pipe(
-        messages,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=0.1,
-    )
+    try:
+        outputs = _pipe(
+            messages,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.1,
+        )
+    except Exception as e:
+        if "System role not supported" in str(e):
+            merged = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+            outputs = _pipe(
+                merged,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.1,
+            )
+        else:
+            raise
 
     result = outputs[0]["generated_text"]
     if isinstance(result, str):
@@ -138,6 +160,14 @@ SYSTEM_PROMPTS = {
     COMP_MATHS: (
         "You are a math expert. Given the context and options, output ONLY 'Answer: [N]' where N is 0, 1, 2, or 3. No explanation."
     ),
+
+    COMP_NEWS: (
+        "You are a news analyst answering multiple-choice questions about recent events. "
+        "An article is provided as the sole source of truth — read it carefully before answering. "
+        "ALWAYS prioritize the article over your own knowledge. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why, quoting the article."
+    ),
 }
 
 
@@ -150,6 +180,8 @@ def get_context(comp_id: int, question_text: str, option_texts: list[str] | None
         return rag_science(question_text, option_texts or [])
     elif comp_id == COMP_MATHS:
         return rag_maths(question_text, option_texts or [])
+    elif comp_id == COMP_NEWS:
+        return rag_news(question_text, option_texts=option_texts or [])
     return ""
 
 
