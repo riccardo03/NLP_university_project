@@ -31,6 +31,11 @@ _SKIP_DOMAINS: frozenset[str] = frozenset({
     "t.me",
 })
 
+_SKIP_URL_PATTERNS: frozenset[str] = frozenset({
+    "/tag/", "/tags/", "/category/", "/categories/",
+    "/topic/", "/topics/", "/search/", "/archive/",
+})
+
 _STOP_WORDS_NEWS: frozenset[str] = frozenset({
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
     "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
@@ -257,14 +262,11 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                     option_entities.append(token)
 
     # Q1 — broad: all entities + date
-    q1 = " ".join(filter(None, [entity_phrase, date_anchor]))
+    q1 = " ".join(filter(None, ["news", entity_phrase, date_anchor]))
     # Q2 — specific: all entities + first 4 content words + date
-    q2 = " ".join(filter(None, [entity_phrase, " ".join(q_content_words[:4]), date_anchor]))
+    q2 = " ".join(filter(None, ["news", entity_phrase, " ".join(q_content_words[:4]), date_anchor]))
     # Q3 — alternative: option named entities + date
-    q3 = " ".join(filter(None, [
-        " ".join(option_entities[:4]) if option_entities else entity_phrase,
-        date_anchor,
-    ]))
+    q3 = " ".join(filter(None, ["news", " ".join(option_entities[:4]) if option_entities else entity_phrase, date_anchor]))
     queries = list(dict.fromkeys(q for q in [q1, q2, q3] if q.strip()))
     print(f"  [News] queries: {queries}")
 
@@ -276,7 +278,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     def _search_and_fetch(q_text: str) -> tuple[str, str]:
         for r in _ddg_search(q_text):
             url = r["url"]
-            if any(domain in url for domain in _SKIP_DOMAINS):
+            if any(domain in url for domain in _SKIP_DOMAINS) or \
+               any(pat in url for pat in _SKIP_URL_PATTERNS):
                 print(f"  [News] skipping: {url[:80]}")
                 continue
             text = _fetch_article(url)
