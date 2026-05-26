@@ -218,37 +218,27 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         )[:60]
 
     date_anchor = raw_date or ""
-    n_opts      = min(len(option_texts), 4) if option_texts else 0
 
-    def _clean_option(opt: str) -> str:
-        words = [
-            t for t in _TOKEN_RE.findall(opt.lower())
-            if len(t) >= 3 and t not in _STOP_WORDS_NEWS
-        ]
-        return " ".join(words[:6])
-
-    subject_tokens = {s.lower() for s in subjects}
+    entity_phrase   = " ".join(subjects[:3])
+    subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
         if len(t) >= 5
         and t not in _STOP_WORDS_NEWS
         and t not in subject_tokens
     ]
-    synth_query = " ".join(filter(None, [
-        main_term,
+
+    # Q1 — broad: all entities + date
+    q1 = " ".join(filter(None, [entity_phrase, date_anchor]))
+    # Q2 — specific: all entities + first 4 content words + date
+    q2 = " ".join(filter(None, [entity_phrase, " ".join(q_content_words[:4]), date_anchor]))
+    # Q3 — alternative: main entity + different content words (offset slice) + date
+    q3 = " ".join(filter(None, [
+        subjects[0] if subjects else entity_phrase,
+        " ".join(q_content_words[2:5]),
         date_anchor,
-        " ".join(q_content_words[:3]),
     ]))
-
-    if n_opts:
-        option_queries = [
-            " ".join(filter(None, [main_term, date_anchor, _clean_option(option_texts[i])]))
-            for i in range(n_opts)
-        ]
-    else:
-        option_queries = [" ".join(filter(None, [main_term, date_anchor]))]
-
-    queries = [synth_query] + option_queries if synth_query.strip() else option_queries
+    queries = list(dict.fromkeys(q for q in [q1, q2, q3] if q.strip()))
     print(f"  [News] queries: {queries}")
 
     q_keywords = {
