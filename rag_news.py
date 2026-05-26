@@ -228,14 +228,25 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         and t not in subject_tokens
     ]
 
+    option_entities: list[str] = []
+    if option_texts:
+        for opt in option_texts[:4]:
+            for token in _TOKEN_RE.findall(opt):
+                if (
+                    len(token) >= 3
+                    and token[0].isupper()
+                    and token.lower() not in _STOP_WORDS_NEWS
+                    and token not in option_entities
+                ):
+                    option_entities.append(token)
+
     # Q1 — broad: all entities + date
     q1 = " ".join(filter(None, [entity_phrase, date_anchor]))
     # Q2 — specific: all entities + first 4 content words + date
     q2 = " ".join(filter(None, [entity_phrase, " ".join(q_content_words[:4]), date_anchor]))
-    # Q3 — alternative: main entity + different content words (offset slice) + date
+    # Q3 — alternative: option named entities + date
     q3 = " ".join(filter(None, [
-        subjects[0] if subjects else entity_phrase,
-        " ".join(q_content_words[2:5]),
+        " ".join(option_entities[:4]) if option_entities else entity_phrase,
         date_anchor,
     ]))
     queries = list(dict.fromkeys(q for q in [q1, q2, q3] if q.strip()))
