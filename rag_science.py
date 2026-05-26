@@ -88,7 +88,7 @@ def setup_science_rag(embed_model: str = SCIENCE_EMBED_MODEL) -> None:
     _bm25_index = BM25Okapi([p.lower().split() for p in _science_passages])
 
     print(f"[Science RAG] Embedding with {embed_model} ...")
-    _science_embedder = SentenceTransformer(embed_model, device="cpu")
+    _science_embedder = SentenceTransformer(embed_model, device="cuda")
     emb = _science_embedder.encode(
         _science_passages,
         batch_size=32,
