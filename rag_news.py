@@ -13,7 +13,23 @@ import requests
 
 _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
-_MAX_DDG_RESULTS   = 3
+_MIN_ARTICLE_CHARS = 200
+_MAX_DDG_RESULTS   = 5
+
+_SKIP_DOMAINS: frozenset[str] = frozenset({
+    "wikipedia.org",
+    "facebook.com",
+    "youtube.com",
+    "reddit.com",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "tiktok.com",
+    "threads.com",
+    "rutube.ru",
+    "vk.com",
+    "t.me",
+})
 
 _STOP_WORDS_NEWS: frozenset[str] = frozenset({
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
@@ -219,7 +235,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
 
     date_anchor = raw_date or ""
 
-    entity_phrase   = " ".join(subjects[:3])
+    entity_phrase   = " ".join(subjects[:3]) if subjects else main_term
     subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
@@ -259,9 +275,13 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
 
     def _search_and_fetch(q_text: str) -> tuple[str, str]:
         for r in _ddg_search(q_text):
-            text = _fetch_article(r["url"])
-            if text and any(kw in text.lower() for kw in q_keywords):
-                return text, r["url"]
+            url = r["url"]
+            if any(domain in url for domain in _SKIP_DOMAINS):
+                print(f"  [News] skipping: {url[:80]}")
+                continue
+            text = _fetch_article(url)
+            if text and len(text) >= _MIN_ARTICLE_CHARS and any(kw in text.lower() for kw in q_keywords):
+                return text, url
         return "", ""
 
     candidates: list[tuple[int, str, str]] = []
