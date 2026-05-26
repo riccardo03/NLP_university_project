@@ -1,7 +1,7 @@
 """
 Philosophy & Psychology RAG: DDG search → article fetch → LLM prompt.
 
-No Wikipedia. No BM25 voting. No caching (content changes frequently).
+No Wikipedia. No BM25 voting.
 Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 """
 
@@ -50,13 +50,7 @@ def _strip_html(raw: str) -> str:
 
 
 def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
-    """
-    Extracts the real article body, skipping nav/header/footer noise.
-    Strategy:
-      1. Collect <p> tags with at least 80 chars (substantial paragraphs)
-      2. Concatenate them up to max_chars
-      3. Fallback to _strip_html[:max_chars] if no paragraphs found
-    """
+
     paragraphs = _P_TAG_RE.findall(raw_html)
     body_parts: list[str] = []
     total = 0

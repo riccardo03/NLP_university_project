@@ -33,12 +33,12 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    30,
-    COMP_HISTORY_POLITICS: 40,
-    COMP_SCIENCE_NATURE:   60,
-    COMP_MATHS:            40,
-    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 70,
-    COMP_NEWS:             70,
+    COMP_ENTERTAINMENT:    100,
+    COMP_HISTORY_POLITICS: 100,
+    COMP_SCIENCE_NATURE:   100,
+    COMP_MATHS:            100,
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 100,
+    COMP_NEWS:             100,
 }
 
 _model     = None
@@ -75,7 +75,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     )
     print("The model is ready to answer.")
 
-    """try:
+    try:
         import rag_entertainment as _rag_ent
         _rag_ent.setup_entertainment_rag()
     except Exception as e:
@@ -91,19 +91,7 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         import rag_maths as _rag_mth
         _rag_mth.setup_maths_rag()
     except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")"""
-
-    try:
-        import rag_news as _rag_nws
-        _rag_nws.setup_news_rag()
-    except Exception as e:
-        print(f"Warning: news RAG setup failed: {e}")
-
-    try:
-        import rag_philosophy_psychology as _rag_pp
-        _rag_pp.setup_philosophy_psychology_rag()
-    except Exception as e:
-        print(f"Warning: philosophy & psychology RAG setup failed: {e}")
+        print(f"Warning: maths RAG setup failed: {e}")
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:

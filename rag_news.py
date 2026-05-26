@@ -1,7 +1,6 @@
 """
 News RAG: date-anchored DDG search → article fetch → LLM prompt.
-
-No Wikipedia. No BM25 voting. No caching (news changes daily).
+No caching (news changes daily).
 Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 """
 
@@ -14,19 +13,15 @@ import requests
 
 _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
-_MIN_ARTICLE_CHARS = 200
-_MAX_DDG_RESULTS   = 5
+_MIN_ARTICLE_CHARS = 100
+_MIN_ARTICLE_CHARS_SOCIAL = 300
+_MAX_DDG_RESULTS   = 10
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "wikipedia.org",
-    "facebook.com",
     "youtube.com",
-    "reddit.com",
-    "twitter.com",
-    "x.com",
     "instagram.com",
     "tiktok.com",
-    "threads.com",
     "rutube.ru",
     "vk.com",
     "t.me",
@@ -92,12 +87,6 @@ _P_TAG_RE  = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
 # ---------------------------------------------------------------------------
 
 def _extract_date(text: str) -> tuple[str, str]:
-    """
-    Returns (raw_date, alt_date).
-    raw_date: exactly as it appears in the text.
-    alt_date: human-readable reformatted version (e.g. "May 18 2026").
-    Both empty strings when no date is found.
-    """
     m = _DATE_ISO_RE.search(text)
     if m:
         year, mon = m.group(1), int(m.group(2))
@@ -265,12 +254,12 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 ):
                     option_entities.append(token)
 
-    # Q1 — broad: all entities + date
-    q1 = " ".join(filter(None, ["news", entity_phrase, date_anchor]))
-    # Q2 — specific: all entities + first 4 content words + date
-    q2 = " ".join(filter(None, ["news", entity_phrase, " ".join(q_content_words[:4]), date_anchor]))
-    # Q3 — alternative: option named entities + date
-    q3 = " ".join(filter(None, ["news", " ".join(option_entities[:4]) if option_entities else entity_phrase, date_anchor]))
+    # Q1 — broad: date + all entities
+    q1 = " ".join(filter(None, ["news", date_anchor, entity_phrase]))
+    # Q2 — specific: date + all entities + first 4 content words
+    q2 = " ".join(filter(None, ["news", date_anchor, entity_phrase, " ".join(q_content_words[:4])]))
+    # Q3 — alternative: date + option named entities
+    q3 = " ".join(filter(None, ["news", date_anchor, " ".join(option_entities[:4]) if option_entities else entity_phrase]))
     queries = list(dict.fromkeys(q for q in [q1, q2, q3] if q.strip()))
     print(f"  [News] queries: {queries}")
 
@@ -293,11 +282,14 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                     print(f"  [News] skipping Wikipedia (recent): {url[:80]}")
                     continue
             elif any(domain in url for domain in _SKIP_DOMAINS) or \
-                 any(pat in url for pat in _SKIP_URL_PATTERNS):
+                any(pat in url for pat in _SKIP_URL_PATTERNS):
                 print(f"  [News] skipping: {url[:80]}")
                 continue
             text = _fetch_article(url)
-            if text and len(text) >= _MIN_ARTICLE_CHARS and any(kw in text.lower() for kw in q_keywords):
+            #social consumes more char for the authentication in the page, so it makes sense to increase the min_char constraint
+            is_social = any(d in url for d in ("twitter.com", "x.com", "facebook.com"))
+            min_chars = _MIN_ARTICLE_CHARS_SOCIAL if is_social else _MIN_ARTICLE_CHARS
+            if text and len(text) >= min_chars and any(kw in text.lower() for kw in q_keywords):
                 return text, url
         return "", ""
 
@@ -312,8 +304,45 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
+    #Second try: we cannot rely on the LLM knowledge for news
     if not candidates:
-        print("  [News] No article found — LLM fallback")
+        print("  [News] No candidates — retry level 2 (content words)")
+        retry2_queries = list(dict.fromkeys(q for q in [
+            " ".join(filter(None, ["news", " ".join(q_content_words[:5]), date_anchor])),
+            " ".join(filter(None, ["news", " ".join(q_content_words[2:6]), date_anchor])),
+        ] if q.strip()))
+
+        if retry2_queries:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(retry2_queries)) as pool:
+                futures = {pool.submit(_search_and_fetch, q): q for q in retry2_queries}
+                for fut in concurrent.futures.as_completed(futures):
+                    text, url = fut.result()
+                    if text:
+                        score = sum(1 for kw in q_keywords if kw in text.lower())
+                        candidates.append((score, text, url))
+                        print(f"  [News] retry2 candidate (score={score}): {url[:80]}")
+
+    #Third try
+    if not candidates:
+        print("  [News] No candidates — retry level 3 (per-option)")
+        retry3_queries = list(dict.fromkeys(
+            " ".join(filter(None, ["news", token, date_anchor]))
+            for token in option_entities[:4]
+            if token.strip()
+        ))
+
+        if retry3_queries:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(retry3_queries))) as pool:
+                futures = {pool.submit(_search_and_fetch, q): q for q in retry3_queries}
+                for fut in concurrent.futures.as_completed(futures):
+                    text, url = fut.result()
+                    if text:
+                        score = sum(1 for kw in q_keywords if kw in text.lower())
+                        candidates.append((score, text, url))
+                        print(f"  [News] retry3 candidate (score={score}): {url[:80]}")
+    #Fallback
+    if not candidates:
+        print("  [News] No article found after all retries — LLM fallback")
         return ""
 
     candidates.sort(key=lambda x: x[0], reverse=True)
