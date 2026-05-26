@@ -7,6 +7,7 @@ Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 
 import concurrent.futures
 import html as _html_module
+import datetime
 import re
 
 import requests
@@ -235,7 +236,10 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     if not main_term:
         tokens    = _TOKEN_RE.findall(query.lower())
         main_term = " ".join(
-            t for t in tokens if len(t) >= 4 and t not in _STOP_WORDS_NEWS
+            t for t in tokens
+            if len(t) >= 5
+            and not t.isdigit()
+            and t not in _STOP_WORDS_NEWS
         )[:60]
 
     date_anchor = raw_date or ""
@@ -278,8 +282,18 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     def _search_and_fetch(q_text: str) -> tuple[str, str]:
         for r in _ddg_search(q_text):
             url = r["url"]
-            if any(domain in url for domain in _SKIP_DOMAINS) or \
-               any(pat in url for pat in _SKIP_URL_PATTERNS):
+            is_wikipedia = "wikipedia.org" in url
+            if is_wikipedia:
+                try:
+                    article_date = datetime.date.fromisoformat(date_anchor) if date_anchor else None
+                    days_old = (datetime.date.today() - article_date).days if article_date else 0
+                except ValueError:
+                    days_old = 0
+                if days_old < 14:
+                    print(f"  [News] skipping Wikipedia (recent): {url[:80]}")
+                    continue
+            elif any(domain in url for domain in _SKIP_DOMAINS) or \
+                 any(pat in url for pat in _SKIP_URL_PATTERNS):
                 print(f"  [News] skipping: {url[:80]}")
                 continue
             text = _fetch_article(url)
