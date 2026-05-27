@@ -22,6 +22,7 @@ _SKIP_DOMAINS: frozenset[str] = frozenset({
     "instagram.com",
     "tiktok.com",
     "rutube.ru",
+    "linkedln.com",
     "vk.com",
     "t.me",
 })
@@ -189,7 +190,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             if len(t) >= 5 and not t.isdigit() and t not in _STOP_WORDS_NEWS
         )[:60]
 
-    entity_phrase   = " ".join(subjects[:3]) if subjects else main_term
+    entity_phrase   = " ".join(subjects[:6]) if subjects else main_term
     subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
@@ -270,6 +271,9 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 if raw_date and raw_date in text:
                     score += 10
                 if raw_date and raw_date in url:
+                    score += 5
+                date_slash = raw_date.replace("-", "/") if raw_date else ""
+                if date_slash and date_slash in url:
                     score += 5
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score:.1f}, {len(text)} chars): {url[:80]}")
