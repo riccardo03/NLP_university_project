@@ -15,10 +15,9 @@ _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
 _MIN_ARTICLE_CHARS = 100
 _MIN_ARTICLE_CHARS_SOCIAL = 300
-_MAX_DDG_RESULTS   = 10
+_MAX_DDG_RESULTS   = 4
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
-    "wikipedia.org",
     "youtube.com",
     "instagram.com",
     "tiktok.com",
@@ -69,13 +68,6 @@ def _strip_html(raw: str) -> str:
 
 
 def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
-    """
-    Extracts the real article body, skipping nav/header/footer noise.
-    Strategy:
-      1. Collect <p> tags with at least 80 chars (substantial paragraphs)
-      2. Concatenate them up to max_chars
-      3. Fallback to _strip_html[:max_chars] if no paragraphs found
-    """
     paragraphs = _P_TAG_RE.findall(raw_html)
     body_parts: list[str] = []
     total = 0
@@ -101,7 +93,7 @@ def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
 # DDG search — no lru_cache (news changes daily)
 # ---------------------------------------------------------------------------
 
-def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[dict]:
+def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[str]:
     try:
         from ddgs import DDGS
         results = []
@@ -109,11 +101,7 @@ def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[dict]:
             for r in ddgs.text(query, max_results=max_results):
                 url = r.get("href") or r.get("url", "")
                 if url:
-                    results.append({
-                        "url":   url,
-                        "title": r.get("title", ""),
-                        "body":  r.get("body", ""),
-                    })
+                    results.append(url)
         return results
     except Exception as e:
         print(f"  [RAG-News] DDG error: {e}")
@@ -125,7 +113,6 @@ def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _fetch_article(url: str) -> str:
-    """Fetch URL, strip HTML, return first _ARTICLE_MAX_CHARS chars of plain text."""
     try:
         r = requests.get(
             url,
@@ -177,8 +164,6 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             and t not in _STOP_WORDS_NEWS
         )[:60]
 
-    date_anchor = raw_date or ""
-
     entity_phrase   = " ".join(subjects[:3]) if subjects else main_term
     subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
@@ -199,17 +184,37 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                     and token not in option_entities
                 ):
                     option_entities.append(token)
-
+    if raw_date:
+        try:
+            d = datetime.date.fromisoformat(raw_date)
+            day_before = (d - datetime.timedelta(days=1)).isoformat()
+            day_after  = (d + datetime.timedelta(days=1)).isoformat()
+            date_ops   = f"after:{day_before} before:{day_after}"
+        except ValueError:
+            date_ops = ""
+    else:
+        date_ops = ""
     # Q1 — date + subject
-    q1 = " ".join(filter(None, ["news", date_anchor, entity_phrase]))
+    q1 = " ".join(filter(None, ["news", entity_phrase, date_ops]))
     # Q2 — date + subject + context
-    q2 = " ".join(filter(None, ["news", date_anchor, entity_phrase, " ".join(q_content_words[:4])]))
+    q2 = " ".join(filter(None, ["news", entity_phrase, " ".join(q_content_words[:4]), date_ops]))
     # Q3-Q6 — date + subject + each option
-    option_queries = [
-        " ".join(filter(None, ["news", date_anchor, entity_phrase, opt]))
-        for opt in (option_texts or [])[:4]
-    ]
-    queries = list(dict.fromkeys(q for q in [q1, q2, *option_queries] if q.strip()))
+    option_queries = []
+    if option_texts:
+        for opt in option_texts[:4]:
+            opt_keywords = " ".join(
+                t for t in _TOKEN_RE.findall(opt.lower())
+                if len(t) >= 3 and t not in _STOP_WORDS_NEWS
+            )[:50]
+            if opt_keywords:
+                option_queries.append(
+                    " ".join(filter(None, ["news", entity_phrase, opt_keywords, date_ops]))
+                )
+
+    queries = list(dict.fromkeys(
+        q for q in [q1, q2] + option_queries if q.strip()
+    ))
+
     print(f"  [News] queries: {queries}")
 
     q_keywords = {
@@ -219,12 +224,11 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
 
     def _search_and_fetch(q_text: str) -> list[tuple[str, str]]:
         results = []
-        for r in _ddg_search(q_text):
-            url = r["url"]
+        for url in _ddg_search(q_text):
             is_wikipedia = "wikipedia.org" in url
             if is_wikipedia:
                 try:
-                    article_date = datetime.date.fromisoformat(date_anchor) if date_anchor else None
+                    article_date = datetime.date.fromisoformat(raw_date) if raw_date else None
                     days_old = (datetime.date.today() - article_date).days if article_date else 0
                 except ValueError:
                     days_old = 0
@@ -245,12 +249,12 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
 
     candidates: list[tuple[int, str, str]] = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(queries))) as pool:
         futures = {pool.submit(_search_and_fetch, q): q for q in queries}
         for fut in concurrent.futures.as_completed(futures):
             for text, url in fut.result():
                 score = sum(1 for kw in q_keywords if kw in text.lower())
-                if date_anchor and date_anchor in text:
+                if raw_date and raw_date in text:
                     score += 3
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
@@ -259,8 +263,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     if not candidates:
         print("  [News] No candidates — retry level 2 (content words)")
         retry2_queries = list(dict.fromkeys(q for q in [
-            " ".join(filter(None, ["news", " ".join(q_content_words[:5]), date_anchor])),
-            " ".join(filter(None, ["news", " ".join(q_content_words[2:6]), date_anchor])),
+            " ".join(filter(None, ["news", " ".join(q_content_words[:5]), date_ops])),
+            " ".join(filter(None, ["news", " ".join(q_content_words[2:6]), date_ops])),
         ] if q.strip()))
 
         if retry2_queries:
@@ -276,7 +280,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     if not candidates:
         print("  [News] No candidates — retry level 3 (per-option)")
         retry3_queries = list(dict.fromkeys(
-            " ".join(filter(None, ["news", token, date_anchor]))
+            " ".join(filter(None, ["news", token, date_ops]))
             for token in option_entities[:4]
             if token.strip()
         ))
