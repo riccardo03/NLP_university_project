@@ -11,6 +11,8 @@ import re
 
 import requests
 
+from rag_entertainment import _extract_subjects_gliner
+
 _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
 _MIN_ARTICLE_CHARS = 100
@@ -144,8 +146,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         print("  [News] No date found in question")
 
     from rag_entertainment import _extract_subjects_gliner, _extract_subjects_regex
-
-    labeled = _extract_subjects_gliner(query)
+    query_for_ner = re.sub(r"'s\b", "", query)            # Arcelli's → Arcelli
+    labeled = _extract_subjects_gliner(query_for_ner)    
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = subjects[0]
@@ -195,9 +197,9 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     else:
         date_ops = ""
     # Q1 — date + subject
-    q1 = " ".join(filter(None, ["news", entity_phrase, date_ops]))
+    q1 = " ".join(filter(None, [entity_phrase, date_ops]))
     # Q2 — date + subject + context
-    q2 = " ".join(filter(None, ["news", entity_phrase, " ".join(q_content_words[:4]), date_ops]))
+    q2 = " ".join(filter(None, [entity_phrase, " ".join(q_content_words[:4]), date_ops]))
     # Q3-Q6 — date + subject + each option
     option_queries = []
     if option_texts:
@@ -208,7 +210,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             )[:50]
             if opt_keywords:
                 option_queries.append(
-                    " ".join(filter(None, ["news", entity_phrase, opt_keywords, date_ops]))
+                    " ".join(filter(None, [entity_phrase, opt_keywords, date_ops]))
                 )
 
     queries = list(dict.fromkeys(
@@ -257,7 +259,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 if raw_date and raw_date in text:
                     score += 3
                 if raw_date and raw_date in url:
-                    score += 2
+                    score += 5
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
@@ -265,8 +267,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     if not candidates:
         print("  [News] No candidates — retry level 2 (content words)")
         retry2_queries = list(dict.fromkeys(q for q in [
-            " ".join(filter(None, ["news", " ".join(q_content_words[:5]), date_ops])),
-            " ".join(filter(None, ["news", " ".join(q_content_words[2:6]), date_ops])),
+            " ".join(filter(None, [" ".join(q_content_words[:5]), date_ops])),
+            " ".join(filter(None, [" ".join(q_content_words[2:6]), date_ops])),
         ] if q.strip()))
 
         if retry2_queries:
@@ -278,7 +280,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                         if raw_date and raw_date in text:
                             score += 3
                         if raw_date and raw_date in url:
-                            score += 2
+                            score += 5
                         candidates.append((score, text, url))
                         print(f"  [News] retry2 candidate (score={score}): {url[:80]}")
 
@@ -300,7 +302,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                         if raw_date and raw_date in text:
                             score += 3
                         if raw_date and raw_date in url:
-                            score += 2
+                            score += 5
                         candidates.append((score, text, url))
                         print(f"  [News] retry3 candidate (score={score}): {url[:80]}")
     #Fallback
