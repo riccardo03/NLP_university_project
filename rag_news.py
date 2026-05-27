@@ -200,13 +200,16 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 ):
                     option_entities.append(token)
 
-    # Q1 — broad: date + all entities
+    # Q1 — date + subject
     q1 = " ".join(filter(None, ["news", date_anchor, entity_phrase]))
-    # Q2 — specific: date + all entities + first 4 content words
+    # Q2 — date + subject + context
     q2 = " ".join(filter(None, ["news", date_anchor, entity_phrase, " ".join(q_content_words[:4])]))
-    # Q3 — alternative: date + option named entities
-    q3 = " ".join(filter(None, ["news", date_anchor, " ".join(option_entities[:4]) if option_entities else entity_phrase]))
-    queries = list(dict.fromkeys(q for q in [q1, q2, q3] if q.strip()))
+    # Q3-Q6 — date + subject + each option
+    option_queries = [
+        " ".join(filter(None, ["news", date_anchor, entity_phrase, opt]))
+        for opt in (option_texts or [])[:4]
+    ]
+    queries = list(dict.fromkeys(q for q in [q1, q2, *option_queries] if q.strip()))
     print(f"  [News] queries: {queries}")
 
     q_keywords = {
