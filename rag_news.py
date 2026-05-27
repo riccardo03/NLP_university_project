@@ -1,6 +1,7 @@
 """
 News RAG: date-anchored DDG search → article fetch → LLM prompt.
 No caching (news changes daily).
+Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 """
 
 import concurrent.futures
@@ -10,6 +11,7 @@ import re
 
 import requests
 
+from rag_entertainment import _extract_subjects_gliner
 
 _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
@@ -40,6 +42,42 @@ _STOP_WORDS_NEWS: frozenset[str] = frozenset({
     "describes", "describe", "best", "most", "called", "named", "article",
     "published", "reported", "stated", "said",
 })
+
+_GLINER_LABELS_NEWS: list[str] = [
+    "person", "politician", "president", "minister", "official",
+    "organization", "company", "institution", "government agency",
+    "country", "city", "location", "region",
+    "law", "legislation", "treaty",
+    "event",
+]
+
+
+def _extract_subjects_news(text: str) -> list[str]:
+    """
+    Extract named entities from text using GLiNER with news-specific labels.
+    Returns list of entity strings, deduplicated, in order of appearance.
+    Falls back to empty list on any error.
+    """
+    try:
+        from rag_entertainment import _gliner_model
+        if _gliner_model is None:
+            return []
+        entities = _gliner_model.predict_entities(
+            text,
+            _GLINER_LABELS_NEWS,
+            threshold=0.4,
+        )
+        seen: set[str] = set()
+        result: list[str] = []
+        for ent in entities:
+            txt = ent["text"].strip()
+            if txt and txt.lower() not in seen:
+                seen.add(txt.lower())
+                result.append(txt)
+        return result
+    except Exception:
+        return []
+
 
 _DATE_ISO_RE = re.compile(r'\b((?:19|20)\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b')
 
@@ -131,7 +169,7 @@ def _fetch_article(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def setup_news_rag() -> None:
-    """No-op: no external models needed for news RAG."""
+    """No-op: GLiNER is loaded by setup_entertainment_rag()."""
     pass
 
 
@@ -143,30 +181,35 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     else:
         print("  [News] No date found in question")
 
-    # Extract capitalized tokens from the question as subjects
-    # (proper nouns: length >= 2, starts with uppercase, not a stop word)
-    subjects = []
-    seen = set()
-    for token in _TOKEN_RE.findall(query):
-        if (
-            len(token) >= 2
-            and token[0].isupper()
-            and token.lower() not in _STOP_WORDS_NEWS
-            and token not in seen
-        ):
-            subjects.append(token)
-            seen.add(token)
+    subjects = _extract_subjects_news(query)
+    if subjects:
+        print(f"  [News] GLiNER entities: {subjects}")
+    else:
+        # Fallback: capitalized tokens from the question
+        subjects = [
+            t for t in _TOKEN_RE.findall(query)
+            if len(t) >= 2
+            and t[0].isupper()
+            and t.lower() not in _STOP_WORDS_NEWS
+        ]
+        print(f"  [News] fallback subjects: {subjects[:6]}")
 
-    entity_phrase = " ".join(subjects[:4]) if subjects else ""
-    print(f"  [News] subjects: {subjects[:4]}")
+    main_term = subjects[0] if subjects else ""
 
-    # Content words from the question (lowercase, length >= 5, not stop words,
-    # not already in subjects)
-    subject_tokens = {s.lower() for s in subjects}
+    if not main_term:
+        tokens = _TOKEN_RE.findall(query.lower())
+        main_term = " ".join(
+            t for t in tokens
+            if len(t) >= 5
+            and not t.isdigit()
+            and t not in _STOP_WORDS_NEWS
+        )[:60]
+
+    entity_phrase   = " ".join(subjects[:3]) if subjects else main_term
+    subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
         if len(t) >= 5
-        and not t.isdigit()
         and t not in _STOP_WORDS_NEWS
         and t not in subject_tokens
     ]
