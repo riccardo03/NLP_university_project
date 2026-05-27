@@ -43,7 +43,7 @@ _STOP_WORDS_NEWS: frozenset[str] = frozenset({
 
 _DATE_ISO_RE = re.compile(r'\b((?:19|20)\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b')
 
-_TOKEN_RE     = re.compile(r'[a-zA-ZÀ-ÿ0-9]+')
+_TOKEN_RE     = re.compile(r'[£€$]?[a-zA-ZÀ-ÿ0-9]+')
 # Remove script/style/nav/header/footer blocks before tag stripping
 _BLOCK_TAG_RE = re.compile(
     r'<(script|style|nav|header|footer|aside|noscript)[^>]*>.*?</\1>',
@@ -204,7 +204,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         for opt in option_texts[:4]:
             opt_keywords = " ".join(
                 t for t in _TOKEN_RE.findall(opt.lower())
-                if len(t) >= 3 and t not in _STOP_WORDS_NEWS
+                #if len(t) >= 3 and t not in _STOP_WORDS_NEWS
             )[:50]
             if opt_keywords:
                 option_queries.append(
@@ -256,6 +256,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 score = sum(1 for kw in q_keywords if kw in text.lower())
                 if raw_date and raw_date in text:
                     score += 3
+                if raw_date and raw_date in url:
+                    score += 2
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
@@ -273,6 +275,10 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 for fut in concurrent.futures.as_completed(futures):
                     for text, url in fut.result():
                         score = sum(1 for kw in q_keywords if kw in text.lower())
+                        if raw_date and raw_date in text:
+                            score += 3
+                        if raw_date and raw_date in url:
+                            score += 2
                         candidates.append((score, text, url))
                         print(f"  [News] retry2 candidate (score={score}): {url[:80]}")
 
@@ -291,6 +297,10 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 for fut in concurrent.futures.as_completed(futures):
                     for text, url in fut.result():
                         score = sum(1 for kw in q_keywords if kw in text.lower())
+                        if raw_date and raw_date in text:
+                            score += 3
+                        if raw_date and raw_date in url:
+                            score += 2
                         candidates.append((score, text, url))
                         print(f"  [News] retry3 candidate (score={score}): {url[:80]}")
     #Fallback
