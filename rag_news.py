@@ -1,7 +1,6 @@
 """
 News RAG: date-anchored DDG search → article fetch → LLM prompt.
 No caching (news changes daily).
-Subject extraction reuses the GLiNER model loaded by setup_entertainment_rag().
 """
 
 import concurrent.futures
@@ -11,7 +10,6 @@ import re
 
 import requests
 
-from rag_entertainment import _extract_subjects_gliner
 
 _TIMEOUT           = 5
 _ARTICLE_MAX_CHARS = 4000
@@ -133,7 +131,7 @@ def _fetch_article(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def setup_news_rag() -> None:
-    """No-op: GLiNER is loaded by setup_entertainment_rag()."""
+    """No-op: no external models needed for news RAG."""
     pass
 
 
@@ -145,32 +143,30 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     else:
         print("  [News] No date found in question")
 
-    from rag_entertainment import _extract_subjects_gliner, _extract_subjects_regex
-    query_for_ner = re.sub(r"'s\b", "", query)            # Arcelli's → Arcelli
-    labeled = _extract_subjects_gliner(query_for_ner)    
-    if labeled:
-        subjects  = [text for text, _ in labeled]
-        main_term = subjects[0]
-        print(f"  [News] GLiNER entities: {labeled}")
-    else:
-        subjects  = _extract_subjects_regex(query)
-        main_term = subjects[0] if subjects else ""
-        print(f"  [News] regex subjects: {subjects}")
+    # Extract capitalized tokens from the question as subjects
+    # (proper nouns: length >= 2, starts with uppercase, not a stop word)
+    subjects = []
+    seen = set()
+    for token in _TOKEN_RE.findall(query):
+        if (
+            len(token) >= 2
+            and token[0].isupper()
+            and token.lower() not in _STOP_WORDS_NEWS
+            and token not in seen
+        ):
+            subjects.append(token)
+            seen.add(token)
 
-    if not main_term:
-        tokens    = _TOKEN_RE.findall(query.lower())
-        main_term = " ".join(
-            t for t in tokens
-            if len(t) >= 5
-            and not t.isdigit()
-            and t not in _STOP_WORDS_NEWS
-        )[:60]
+    entity_phrase = " ".join(subjects[:4]) if subjects else ""
+    print(f"  [News] subjects: {subjects[:4]}")
 
-    entity_phrase   = " ".join(subjects[:3]) if subjects else main_term
-    subject_tokens  = {s.lower() for s in subjects}
+    # Content words from the question (lowercase, length >= 5, not stop words,
+    # not already in subjects)
+    subject_tokens = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
         if len(t) >= 5
+        and not t.isdigit()
         and t not in _STOP_WORDS_NEWS
         and t not in subject_tokens
     ]
