@@ -87,11 +87,11 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
 
-    try:
+    """try:
         import rag_maths as _rag_mth
         _rag_mth.setup_maths_rag()
     except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")
+        print(f"Warning: maths RAG setup failed: {e}")"""
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:

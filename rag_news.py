@@ -259,7 +259,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 if raw_date and raw_date in text:
                     score += 3
                 if raw_date and raw_date in url:
-                    score += 5
+                    score += 4
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
@@ -280,7 +280,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                         if raw_date and raw_date in text:
                             score += 3
                         if raw_date and raw_date in url:
-                            score += 5
+                            score += 4
                         candidates.append((score, text, url))
                         print(f"  [News] retry2 candidate (score={score}): {url[:80]}")
 
@@ -288,7 +288,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     if not candidates:
         print("  [News] No candidates — retry level 3 (per-option)")
         retry3_queries = list(dict.fromkeys(
-            " ".join(filter(None, ["news", token, date_ops]))
+            " ".join(filter(None, [token, date_ops]))
             for token in option_entities[:4]
             if token.strip()
         ))
@@ -302,7 +302,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                         if raw_date and raw_date in text:
                             score += 3
                         if raw_date and raw_date in url:
-                            score += 5
+                            score += 4
                         candidates.append((score, text, url))
                         print(f"  [News] retry3 candidate (score={score}): {url[:80]}")
     #Fallback
