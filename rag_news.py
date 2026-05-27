@@ -42,34 +42,7 @@ _STOP_WORDS_NEWS: frozenset[str] = frozenset({
     "published", "reported", "stated", "said",
 })
 
-_MONTH_FULL: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
-_MONTH_TO_FULL: dict[str, str] = {
-    **{m.lower(): m for m in _MONTH_FULL},
-    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
-    "jun": "June",    "jul": "July",     "aug": "August",
-    "sep": "September", "oct": "October", "nov": "November", "dec": "December",
-}
-# Longest keys first so alternation in regex never short-circuits on abbreviations
-_MONTH_PAT: str = "|".join(
-    sorted(_MONTH_TO_FULL.keys(), key=len, reverse=True)
-)
-
 _DATE_ISO_RE = re.compile(r'\b((?:19|20)\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b')
-_DATE_MDY_RE = re.compile(
-    rf'\b({_MONTH_PAT})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{{2}})\b',
-    re.IGNORECASE,
-)
-_DATE_DMY_RE = re.compile(
-    rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_PAT})\s+((?:19|20)\d{{2}})\b',
-    re.IGNORECASE,
-)
-_DATE_MY_RE = re.compile(
-    rf'\b({_MONTH_PAT})\s+((?:19|20)\d{{2}})\b',
-    re.IGNORECASE,
-)
 
 _TOKEN_RE     = re.compile(r'[a-zA-ZÀ-ÿ0-9]+')
 # Remove script/style/nav/header/footer blocks before tag stripping
@@ -81,34 +54,6 @@ _TAG_RE    = re.compile(r'<[^>]+>')
 _WS_RE     = re.compile(r'\s+')
 _P_TAG_RE  = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
 
-
-# ---------------------------------------------------------------------------
-# Date extraction
-# ---------------------------------------------------------------------------
-
-def _extract_date(text: str) -> tuple[str, str]:
-    m = _DATE_ISO_RE.search(text)
-    if m:
-        year, mon = m.group(1), int(m.group(2))
-        day  = int(m.group(3))
-        return m.group(0), f"{_MONTH_FULL[mon - 1]} {day} {year}"
-
-    m = _DATE_MDY_RE.search(text)
-    if m:
-        month_full = _MONTH_TO_FULL.get(m.group(1).lower(), m.group(1).capitalize())
-        return m.group(0), f"{month_full} {m.group(2)} {m.group(3)}"
-
-    m = _DATE_DMY_RE.search(text)
-    if m:
-        month_full = _MONTH_TO_FULL.get(m.group(2).lower(), m.group(2).capitalize())
-        return m.group(0), f"{month_full} {m.group(1)} {m.group(3)}"
-
-    m = _DATE_MY_RE.search(text)
-    if m:
-        month_full = _MONTH_TO_FULL.get(m.group(1).lower(), m.group(1).capitalize())
-        return m.group(0), f"{month_full} {m.group(2)}"
-
-    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +149,10 @@ def setup_news_rag() -> None:
 
 
 def rag_news(query: str, option_texts: list[str] | None = None) -> str:
-    raw_date, alt_date = _extract_date(query)
+    m = _DATE_ISO_RE.search(query)
+    raw_date = m.group(0) if m else ""
     if raw_date:
-        print(f"  [News] date: {raw_date!r}  alt: {alt_date!r}")
+        print(f"  [News] date: {raw_date!r}")
     else:
         print("  [News] No date found in question")
 
@@ -268,7 +214,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         if len(t) >= 4 and t not in _STOP_WORDS_NEWS
     }
 
-    def _search_and_fetch(q_text: str) -> tuple[str, str]:
+    def _search_and_fetch(q_text: str) -> list[tuple[str, str]]:
+        results = []
         for r in _ddg_search(q_text):
             url = r["url"]
             is_wikipedia = "wikipedia.org" in url
@@ -290,17 +237,18 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             is_social = any(d in url for d in ("twitter.com", "x.com", "facebook.com"))
             min_chars = _MIN_ARTICLE_CHARS_SOCIAL if is_social else _MIN_ARTICLE_CHARS
             if text and len(text) >= min_chars and any(kw in text.lower() for kw in q_keywords):
-                return text, url
-        return "", ""
+                results.append((text, url))
+        return results
 
     candidates: list[tuple[int, str, str]] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as pool:
         futures = {pool.submit(_search_and_fetch, q): q for q in queries}
         for fut in concurrent.futures.as_completed(futures):
-            text, url = fut.result()
-            if text:
+            for text, url in fut.result():
                 score = sum(1 for kw in q_keywords if kw in text.lower())
+                if date_anchor and date_anchor in text:
+                    score += 3
                 candidates.append((score, text, url))
                 print(f"  [News] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
@@ -316,8 +264,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(retry2_queries)) as pool:
                 futures = {pool.submit(_search_and_fetch, q): q for q in retry2_queries}
                 for fut in concurrent.futures.as_completed(futures):
-                    text, url = fut.result()
-                    if text:
+                    for text, url in fut.result():
                         score = sum(1 for kw in q_keywords if kw in text.lower())
                         candidates.append((score, text, url))
                         print(f"  [News] retry2 candidate (score={score}): {url[:80]}")
@@ -335,8 +282,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(retry3_queries))) as pool:
                 futures = {pool.submit(_search_and_fetch, q): q for q in retry3_queries}
                 for fut in concurrent.futures.as_completed(futures):
-                    text, url = fut.result()
-                    if text:
+                    for text, url in fut.result():
                         score = sum(1 for kw in q_keywords if kw in text.lower())
                         candidates.append((score, text, url))
                         print(f"  [News] retry3 candidate (score={score}): {url[:80]}")
