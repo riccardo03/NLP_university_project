@@ -14,9 +14,9 @@ import requests
 from rag_entertainment import _extract_subjects_gliner
 
 _TIMEOUT           = 5
-_ARTICLE_MAX_CHARS = 4000
-_MIN_ARTICLE_CHARS = 100
-_MIN_ARTICLE_CHARS_SOCIAL = 300
+_ARTICLE_MAX_CHARS = 10000
+_MIN_ARTICLE_CHARS = 500
+_MIN_ARTICLE_CHARS_SOCIAL = 500
 _MAX_DDG_RESULTS   = 4
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
@@ -182,6 +182,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
         print("  [News] No date found in question")
 
     subjects = _extract_subjects_news(query)
+    subjects = [s for s in subjects if not _DATE_ISO_RE.search(s)]
     if subjects:
         print(f"  [News] GLiNER entities: {subjects}")
     else:
@@ -273,7 +274,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                     days_old = (datetime.date.today() - article_date).days if article_date else 0
                 except ValueError:
                     days_old = 0
-                if days_old < 14:
+                if days_old < 7:
                     print(f"  [News] skipping Wikipedia (recent): {url[:80]}")
                     continue
             elif any(domain in url for domain in _SKIP_DOMAINS) or \
