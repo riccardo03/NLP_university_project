@@ -127,22 +127,11 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        """You are a quiz expert answering multiple-choice entertainment questions.
-
-        You will receive:
-        - WIKIPEDIA: factual context about the subject
-        - WEB CONTEXT: additional snippets from the web
-        - QUESTION: the question to answer
-        - OPTIONS: the 4 choices, some tagged with [retrieval: strong] or [retrieval: weak]
-
-        Rules:
-        1. Read WIKIPEDIA and WEB CONTEXT carefully before answering.
-        2. [retrieval: strong] means that option has the most supporting evidence — prefer it unless Wikipedia contradicts it.
-        3. [retrieval: weak] means little or no evidence was found for that option.
-        4. If evidence is absent or unclear, use your own knowledge.
-        5. If multiple options seem equally supported, trust WIKIPEDIA over retrieval scores.
-        6. For NOT/EXCEPT questions, pick the option with the LEAST supporting evidence.
-        7. Reply with ONLY a single digit: 0, 1, 2 or 3. No explanation. No text."""
+       "You are an expert answering multiple-choice questions. "
+        "An article may be provided as context — read it carefully before answering. "
+        "ALWAYS prioritize the article over your own knowledge when it is relevant. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why."
     ),
 
     COMP_HISTORY_POLITICS: (
