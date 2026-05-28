@@ -262,7 +262,11 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(queries))) as pool:
         futures = {pool.submit(_search_and_fetch, q): q for q in queries}
         for fut in concurrent.futures.as_completed(futures):
-            for text, url in fut.result():
+            try:
+                results = fut.result(timeout=8)
+            except Exception:
+                continue
+            for text, url in results:
                 raw_score = (
                     sum(2 for kw in option_kw   if kw in text.lower()) +
                     sum(1 for kw in question_kw if kw in text.lower())
