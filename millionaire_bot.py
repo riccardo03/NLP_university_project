@@ -192,7 +192,7 @@ SYSTEM_PROMPTS = {
 
 def get_context(comp_id: int, question_text: str, option_texts: list[str] | None = None) -> str:
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_entertainment(question_text, option_texts=option_texts or [])
+        return rag_philosophy_psychology(question_text, option_texts=option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
