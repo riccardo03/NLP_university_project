@@ -142,7 +142,7 @@ def _fetch_article(url: str) -> str:
     try:
         r = requests.get(
             url,
-            timeout=_TIMEOUT,
+            timeout=(_TIMEOUT, _TIMEOUT),
             headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"},
         )
         if r.status_code != 200:
