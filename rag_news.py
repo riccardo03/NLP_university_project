@@ -22,7 +22,7 @@ _SKIP_DOMAINS: frozenset[str] = frozenset({
     "instagram.com",
     "tiktok.com",
     "rutube.ru",
-    "linkedln.com",
+    "linkedin.com",
     "vk.com",
     "t.me",
 })
@@ -251,7 +251,13 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                  any(pat in url for pat in _SKIP_URL_PATTERNS):
                 print(f"  [News] skipping: {url[:80]}")
                 continue
-            text = _fetch_article(url)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as fetch_pool:
+                fetch_fut = fetch_pool.submit(_fetch_article, url)
+                try:
+                    text = fetch_fut.result(timeout=10)
+                except Exception:
+                    print(f"  [News] fetch timeout: {url[:80]}")
+                    text = ""
             min_chars = _MIN_ARTICLE_CHARS
             if text and len(text) >= min_chars and any(kw in text.lower() for kw in q_keywords):
                 results.append((text, url))
