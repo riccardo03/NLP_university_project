@@ -173,6 +173,9 @@ SYSTEM_PROMPTS = {
         "You are a news analyst answering multiple-choice questions about recent events. "
         "An article is provided as the sole source of truth — read it carefully before answering. "
         "ALWAYS prioritize the article over your own knowledge. "
+        "CRITICAL: reply with the INDEX of the correct option (0, 1, 2, or 3), "
+        "NOT the value of the answer itself. For example, if the answer is '3' "
+        "and option [0] is '3', reply ANSWER: 0. "
         "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
         "Then one sentence explaining why, quoting the article."
     ),
