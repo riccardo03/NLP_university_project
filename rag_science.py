@@ -24,8 +24,7 @@ RRF_K               = 60
 MMLU_SCIENCE_SUBSETS = [
     "high_school_biology", "high_school_chemistry", "high_school_physics",
     "college_biology",     "college_chemistry",     "college_physics",
-    "astronomy", "anatomy", "nutrition", "virology", "medical_genetics",
-    "environmental_science", "conceptual_physics",     
+    "astronomy", "anatomy", "nutrition", "virology", "medical_genetics", "conceptual_physics",     
     "college_medicine", "clinical_knowledge", "human_aging",
     "miscellaneous", "global_facts",
 ]

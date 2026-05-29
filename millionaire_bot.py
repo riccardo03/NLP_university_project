@@ -6,7 +6,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline, BitsAndBytesConfig
 from transformers import logging as transformers_logging
 
-from rag_entertainment         import rag_entertainment
+from rag_entertainment_v2      import rag_entertainment
 from rag_history               import rag_history
 from rag_science               import rag_science
 from rag_maths                 import rag_maths
@@ -181,7 +181,7 @@ SYSTEM_PROMPTS = {
 
 def get_context(comp_id: int, question_text: str, option_texts: list[str] | None = None) -> str:
     if comp_id == COMP_ENTERTAINMENT:
-        return rag_news(question_text, option_texts=option_texts or [])
+        return rag_entertainment(question_text, option_texts=option_texts or [])
     elif comp_id == COMP_HISTORY_POLITICS:
         return rag_history(question_text)
     elif comp_id == COMP_SCIENCE_NATURE:
