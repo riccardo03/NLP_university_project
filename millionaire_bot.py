@@ -9,7 +9,7 @@ from transformers import logging as transformers_logging
 from rag_entertainment         import rag_entertainment
 from rag_history               import rag_history
 from rag_science               import rag_science
-from rag_maths_old                 import rag_maths
+from rag_math                import rag_maths
 from rag_news                  import rag_news
 from rag_philosophy_psychology import rag_philosophy_psychology
 
