@@ -9,7 +9,7 @@ from transformers import logging as transformers_logging
 from rag_entertainment         import rag_entertainment
 from rag_history               import rag_history
 from rag_science               import rag_science
-from rag_maths                 import rag_maths
+from rag_maths_old                 import rag_maths
 from rag_news                  import rag_news
 from rag_philosophy_psychology import rag_philosophy_psychology
 
@@ -44,6 +44,21 @@ _MAX_TOKENS = {
 _model     = None
 _tokenizer = None
 _pipe      = None
+
+def _pipe_call(messages, max_new_tokens: int) -> str:
+    try:
+        outputs = _pipe(messages, max_new_tokens=max_new_tokens, do_sample=False)
+    except Exception as e:
+        if "System role not supported" in str(e):
+            system = next((m["content"] for m in messages if m["role"] == "system"), "")
+            user   = next((m["content"] for m in messages if m["role"] == "user"), "")
+            merged = [{"role": "user", "content": f"{system}\n\n{user}"}]
+            outputs = _pipe(merged, max_new_tokens=max_new_tokens, do_sample=False)
+        else:
+            raise
+    result = outputs[0]["generated_text"]
+    return result.strip() if isinstance(result, str) else result[-1]["content"].strip()
+
 
 
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
@@ -87,11 +102,11 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
 
-    """try:
+    try:
         import rag_maths as _rag_mth
-        _rag_mth.setup_maths_rag()
+        _rag_mth.setup_maths_rag(llm_callback=_pipe_call)
     except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")"""
+        print(f"Warning: maths RAG setup failed: {e}")
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
@@ -161,7 +176,14 @@ SYSTEM_PROMPTS = {
     ),
 
     COMP_MATHS: (
-        "You are a math expert. Given the context and options, output ONLY 'Answer: [N]' where N is 0, 1, 2, or 3. No explanation."
+        "You are an expert mathematical and statistical evaluator.\n"
+        "RULES:\n"
+        "1. If the Context contains 'DIRECT_ANSWER: X', you MUST output 'ANSWER: X' immediately.\n"
+        "2. If there is 'Mathematical Theory Context', use it to deduce the correct theoretical statement.\n"
+        "3. Do not try to guess calculations mentally.\n"
+        "REQUIRED: Your VERY LAST LINE must be exactly:\n"
+        "ANSWER: X\n"
+        "where X ∈ {0, 1, 2, 3}."
     ),
 
     COMP_NEWS: (
