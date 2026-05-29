@@ -6,7 +6,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, pipeline, BitsAndBytesConfig
 from transformers import logging as transformers_logging
 
-from rag_entertainment_v2      import rag_entertainment
+from rag_entertainment         import rag_entertainment
 from rag_history               import rag_history
 from rag_science               import rag_science
 from rag_maths                 import rag_maths
@@ -127,10 +127,16 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-       "You are an expert answering multiple-choice questions. "
-        "An article may be provided as context — read it carefully before answering. "
-        "ALWAYS prioritize the article over your own knowledge when it is relevant. "
-        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "You are an entertainment expert answering multiple-choice questions about films, TV shows, music, actors, directors, and celebrities.\n"
+        "You may receive structured retrieval context with up to two sections:\n"
+        "  • WIKIPEDIA (key passages) — factual background on the subject.\n"
+        "  • Per-option evidence blocks ranked by relevance score. The option marked '★ STRONGEST EVIDENCE' has the most supporting text.\n"
+        "Rules:\n"
+        "1. If an option is marked '★ STRONGEST EVIDENCE' AND its snippet clearly supports the answer, choose that option.\n"
+        "2. If scores are close or the snippets are weakly related, rely on your own entertainment knowledge.\n"
+        "3. If no context is provided, answer entirely from your own knowledge.\n"
+        "4. Never choose an option solely because it has a high score — read the snippet to confirm.\n"
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3).\n"
         "Then one sentence explaining why."
     ),
 

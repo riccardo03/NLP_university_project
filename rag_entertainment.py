@@ -1,93 +1,97 @@
-"""Entertainment RAG: GLiNER entity extraction → semantic queries → Wikipedia + DDG → BM25 vote."""
+"""
+Pipeline:
+  1. Estrae i soggetti dalla domanda (titoli citati, nomi propri).
+  2. Per ogni opzione costruisce una query: "<opzione> <soggetto>".
+  3. Cerca su Wikipedia (soggetto principale) + DuckDuckGo (per ogni opzione).
+  4. Assegna un punteggio a ogni opzione misurando co-occorrenza opzione/soggetto.
+  5. Restituisce un contesto strutturato all'LLM.
+  6. Se nessuna ricerca produce evidenze → stringa vuota → fallback sul LLM.
+"""
 
 import re
 import concurrent.futures
 import urllib.parse
 import requests
-from dataclasses import dataclass
 from functools import lru_cache
-from rank_bm25 import BM25Okapi
 
-_WIKI_UA = "QuizBot/1.0 (research)"
-_TIMEOUT = 4
+# ── Costanti ──────────────────────────────────────────────────────────────────
 
-_STOP_WORDS_BASE: frozenset[str] = frozenset({
+_WIKI_UA         = "QuizBot/1.0 (research)"
+_TIMEOUT         = 4
+_EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
+_STOP_WORDS = {
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
     "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
     "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
     "has", "have", "had", "will", "would", "could", "should", "can", "may",
     "this", "that", "these", "those", "their", "there", "according", "following",
-    "describes", "describe", "best", "most", "called", "named", "own", "article",
+    "describes", "describe", "best", "most", "called", "named", "own",
+    "film", "movie", "song", "show", "album", "band", "role", "character",
+    "single", "track", "series", "actor", "actress", "director", "article",
+}
+
+_RELATION_VERBS = frozenset({
+    "starred", "stars", "starring", "played", "plays", "playing",
+    "appeared", "appears", "performed", "performs", "voiced", "voices",
+    "portrayed", "portrays", "directed", "directs", "wrote", "writes",
+    "written", "produced", "produces", "created", "creates", "recorded",
+    "records", "released", "releases", "hosted", "hosts", "featured",
+    "features", "sang", "sings", "won", "wins", "nominated", "known",
+    "describes", "describe", "called", "named", "is", "was",
 })
-_DOMAIN_TERMS: frozenset[str] = frozenset({
-    "film", "movie", "song", "show", "album", "band", "role",
-    "character", "single", "track", "series", "actor", "actress", "director",
-})
-_STOP_WORDS: frozenset[str] = _STOP_WORDS_BASE | _DOMAIN_TERMS
 
 _GLINER_MODEL_NAME = "urchade/gliner_medium-v2.1"
 _GLINER_LABELS = [
-    "movie", "film", "TV show", "TV series", "person", "actor", "musician",
-    "director", "band", "music group", "album", "song", "family member",
-    "historical person", "character",
+    "movie", "film", "TV show", "TV series",
+    "person", "actor", "musician", "director",
+    "band", "music group",
+    "album", "song",
+    "character",
 ]
+# Lower index = higher priority as Wikipedia search anchor
 _GLINER_LABEL_PRIORITY: dict[str, int] = {
     "movie": 0, "film": 0, "TV show": 0, "TV series": 0,
     "album": 1, "song": 1,
     "person": 2, "actor": 2, "musician": 2, "director": 2,
-    "band": 2, "music group": 2, "family member": 2, "historical person": 2,
+    "band": 2, "music group": 2,
     "character": 3,
 }
 _TITLE_LABELS  = frozenset({"movie", "film", "TV show", "TV series"})
-_PERSON_LABELS = frozenset({
-    "person", "actor", "musician", "director", "band",
-    "music group", "family member", "historical person",
-})
-_DISAMBIGUATION_PHRASES = (
-    "may refer to:",
-    "most commonly refers to:",
-    "can refer to:",
-    "can mean:",
-    "is a disambiguation",
-)
+_PERSON_LABELS = frozenset({"person", "actor", "musician", "director", "band", "music group"})
 
-_QUOTED_RE        = re.compile(r"""['\"''""]([\w][\w\s,.\-&!]{1,58}?)['\"''""]""")
+_QUOTED_RE        = re.compile(r"""['"\u2018\u2019\u201C\u201D]([\w][\w\s,.\-&!]{1,58}?)['"\u2018\u2019\u201C\u201D]""")
 _PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
 _PROPER_SINGLE_RE = re.compile(r'^[A-ZÀ-Ý][a-zA-ZÀ-ÿ]{2,}$')
 _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
-_NOT_EXCEPT_RE    = re.compile(r'\b(NOT|EXCEPT|least|never|false|incorrect|wrong)\b', re.IGNORECASE)
 
-# Tokens carrying negation; contracted forms like "didn't" → ["didn","t"] are excluded.
-_NEGATION_TOKENS: frozenset[str] = frozenset({
-    "not", "never", "no", "nor", "neither",
-    "denied", "failed", "refused", "unrelated", "unconnected",
+_ABSTRACT_KEYWORDS = frozenset({
+    "principle", "concept", "reason", "fundamental",
+    "why", "how", "purpose", "significance", "mean", "represents"
 })
-_VOTE_CONFIDENCE_MIN: float = 0.5
 
-_gliner_model: object = None
+# ── Lazy GLiNER model ────────────────────────────────────────────────────────
 
-
-@dataclass(frozen=True)
-class WeightedQuery:
-    text:     str
-    weight:   float
-    strategy: str
+_gliner_model = None
+_gliner_model_tried = False
 
 
-def setup_entertainment_rag() -> None:
-    global _gliner_model
-    _wiki_lookup.cache_clear()  
-    _ddg_lookup.cache_clear()   
-    print("  [RAG-Entertainment] Loading GLiNER model...")
+def _get_gliner_model():
+    global _gliner_model, _gliner_model_tried
+    if _gliner_model_tried:
+        return _gliner_model
+    _gliner_model_tried = True
     try:
         from gliner import GLiNER
         _gliner_model = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
-        print("  [RAG-Entertainment] GLiNER ready.")
     except Exception as e:
-        print(f"  [RAG-Entertainment] GLiNER unavailable: {e}")
+        print(f"  [RAG] GLiNER model unavailable: {e}")
+    return _gliner_model
 
+
+# ── Tokenizzazione & keyword ──────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
@@ -97,66 +101,67 @@ def _keywords(text: str) -> set[str]:
     return {t for t in _tokenize(text) if len(t) >= 3 and t not in _STOP_WORDS}
 
 
+def _clean_query_text(text: str) -> str:
+    kept = [w for w in text.split() if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS]
+    return " ".join(kept) if kept else text
+
+
+# ── Estrazione soggetti ───────────────────────────────────────────────────────
 
 def _extract_subjects_regex(question: str) -> list[str]:
+    """Fallback: quoted titles → multi-word proper nouns → single proper nouns."""
+    subjects: list[str] = []
     seen: set[str] = set()
-    out:  list[str] = []
 
-    def _add(s: str) -> None:
-        s = s.strip()
-        if s and s.lower() not in seen and s.lower() not in _STOP_WORDS:
-            seen.add(s.lower()); out.append(s)
+    def _add(raw: str) -> None:
+        s = raw.strip()
+        sl = s.lower()
+        if s and sl not in seen and sl not in _STOP_WORDS:
+            seen.add(sl)
+            subjects.append(s)
 
-    for q in _QUOTED_RE.findall(question): _add(q)
-    for m in _PROPER_MULTI_RE.findall(question): _add(m)
+    for q in _QUOTED_RE.findall(question):
+        _add(q)
+
+    for m in _PROPER_MULTI_RE.findall(question):
+        _add(m)
+
     for w in question.split()[1:]:
-        c = re.sub(r"[^\w]+$", "", w)
-        if _PROPER_SINGLE_RE.match(c) and c.lower() not in seen and not any(c in s.split() for s in out):
-            _add(c)
-    return out
+        clean = re.sub(r"[^\w]+$", "", w)
+        if (_PROPER_SINGLE_RE.match(clean)
+                and clean.lower() not in seen
+                and not any(clean in s.split() for s in subjects)):
+            _add(clean)
+
+    return subjects
 
 
 def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
-    if _gliner_model is None:
+    """GLiNER extraction; returns [(text, label), ...] sorted by label priority."""
+    model = _get_gliner_model()
+    if model is None:
         return []
     try:
-        entities = _gliner_model.predict_entities(question, _GLINER_LABELS, threshold=0.45)
-        # Lower threshold for person-type labels to catch family members.
-        person_labels = ["person", "actor", "musician", "director", "family member", "historical person"]
-        secondary     = _gliner_model.predict_entities(question, person_labels, threshold=0.30)
-        primary_texts = {e["text"].strip().lower() for e in entities}
-        entities     += [e for e in secondary if e["text"].strip().lower() not in primary_texts]
-        entities.sort(key=lambda e: (_GLINER_LABEL_PRIORITY.get(e["label"], 99), e["start"]))
+        entities = model.predict_entities(question, _GLINER_LABELS, threshold=0.5)
+        entities.sort(key=lambda e: (
+            _GLINER_LABEL_PRIORITY.get(e["label"], 99),
+            e["start"],
+        ))
         seen: set[str] = set()
         result: list[tuple[str, str]] = []
         for e in entities:
-            text, tl = e["text"].strip(), e["text"].strip().lower()
+            text = e["text"].strip()
+            tl = text.lower()
             if text and tl not in seen and tl not in _STOP_WORDS:
-                seen.add(tl); result.append((text, e["label"]))
+                seen.add(tl)
+                result.append((text, e["label"]))
         return result
     except Exception:
         return []
 
 
-def _extract_option_entity(option: str) -> str:
-    m = _QUOTED_RE.search(option)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r'\b(19|20)\d{2}s?\b', option)
-    if m:
-        return m.group(0)
-    m = _PROPER_MULTI_RE.search(option)
-    if m:
-        return m.group(0)
-    return ""
-
-
 def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
-    persons = [t for t, l in labeled if l in _PERSON_LABELS]
-    titles  = [t for t, l in labeled if l in _TITLE_LABELS]
-    # Prefer person as anchor when there are multiple titles (disambiguation).
-    if persons and len(titles) > 1:
-        return persons[0]
+    """Explicit label-based anchor selection: title entities first, then person/band."""
     for preferred in (_TITLE_LABELS, _PERSON_LABELS):
         for text, label in labeled:
             if label in preferred:
@@ -164,320 +169,297 @@ def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
     return labeled[0][0] if labeled else ""
 
 
-def _pick_wiki_anchors(labeled: list[tuple[str, str]]) -> list[str]:
-    titles  = [t for t, l in labeled if l in _TITLE_LABELS]
-    persons = [t for t, l in labeled if l in _PERSON_LABELS]
-    anchors = (titles[:1] + persons[:1]) or ([labeled[0][0]] if labeled else [])
-    if len(anchors) < 2:
-        for text, _ in labeled:
-            if text not in anchors:
-                anchors.append(text); break
-    return anchors[:2]
-
+# ── Ricerca: Wikipedia ────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=64)
 def _wiki_lookup(query: str) -> str:
+    """list=search → primo titolo non-ambiguo → estratto pulito."""
     try:
-        ua, q = {"User-Agent": _WIKI_UA}, urllib.parse.quote(query)
-        r = requests.get(
-            f"https://en.wikipedia.org/w/api.php?action=query&list=search"
-            f"&srsearch={q}&srlimit=3&srnamespace=0&format=json",
-            headers=ua, timeout=_TIMEOUT,
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&list=search&srsearch={urllib.parse.quote(query)}"
+            f"&srlimit=3&srnamespace=0&format=json"
         )
-        if r.status_code != 200: return ""
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=_TIMEOUT)
+        if r.status_code != 200:
+            return ""
         results = r.json().get("query", {}).get("search", [])
-        if not results: return ""
+        if not results:
+            return ""
         candidates = [item["title"] for item in results]
-        title = next((c for c in candidates if "disambiguation" not in c.lower()), candidates[0])
-        r = requests.get(
-            f"https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
-            f"&exintro=false&explaintext=true&exchars=8000"
-            f"&titles={urllib.parse.quote(title)}&format=json",
-            headers=ua, timeout=_TIMEOUT + 2,
+        title = next(
+            (c for c in candidates if "disambiguation" not in c.lower()),
+            candidates[0],
         )
-        if r.status_code != 200: return ""
-        text = next(iter(r.json()["query"]["pages"].values())).get("extract", "")
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&prop=extracts&exintro=false&explaintext=true"
+            f"&titles={urllib.parse.quote(title)}&format=json"
+        )
+        r = requests.get(url, headers={"User-Agent": _WIKI_UA}, timeout=_TIMEOUT)
+        if r.status_code != 200:
+            return ""
+        pages = r.json()["query"]["pages"]
+        text = next(iter(pages.values())).get("extract", "")
         text = _CITE_RE.sub("", text)
-        return text if not any(p in text.lower() for p in _DISAMBIGUATION_PHRASES) else ""
+        return text if "may refer to:" not in text.lower() else ""
     except Exception:
         return ""
 
+def _wiki_relevant_passages(wiki_text: str, question: str,
+                            max_chars: int = 1500) -> str:
 
-def _wiki_relevant_passages(wiki_text: str, question: str, max_chars: int = 1500) -> str:
     if not wiki_text:
         return ""
-    paragraphs = [p.strip() for p in re.split(r"\n+", wiki_text)
-                  if len(p.strip()) > 50 and not _SECTION_HEADER.match(p.strip())]
+ 
+    paragraphs = [
+        p.strip() for p in re.split(r"\n+", wiki_text)
+        if len(p.strip()) > 50 and not _SECTION_HEADER.match(p.strip())
+    ]
     if not paragraphs:
         return wiki_text[:max_chars]
+ 
     q_kws = _keywords(question)
     if not q_kws:
         return paragraphs[0][:max_chars]
-    intro  = paragraphs[0]
-    scored = sorted(((len(q_kws & set(_tokenize(p))), p) for p in paragraphs[1:]),
-                    key=lambda x: x[0], reverse=True)
-    out, budget = [intro], max_chars - len(intro)
+ 
+    intro = paragraphs[0]
+    rest  = paragraphs[1:]
+ 
+    scored = [(len(q_kws & set(_tokenize(p))), p) for p in rest]
+    scored.sort(key=lambda x: -x[0])
+ 
+    out: list[str] = [intro]
+    budget = max_chars - len(intro)
     for score, p in scored:
         if score < 2 or budget <= 100:
             break
-        snippet = p if len(p) <= budget else p[:budget].rsplit(" ", 1)[0] + "..."
-        out.append(snippet); budget -= len(snippet) + 2
+        snippet = p if len(p) <= budget else p[:budget].rsplit(" ", 1)[0] + "…"
+        out.append(snippet)
+        budget -= len(snippet) + 2
+ 
     return "\n\n".join(out)
 
 
-def _fetch_multi_wiki(anchors: list[str], question: str, max_chars: int = 600) -> str:
-    if not anchors:
-        return ""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        raw = dict(zip(anchors, ex.map(_wiki_lookup, anchors)))
-    parts = [
-        f"[WIKI: {a}]\n{p}"
-        for a in anchors
-        if (p := _wiki_relevant_passages(raw.get(a, ""), question, max_chars=max_chars))
-    ]
-    return "\n\n".join(parts)
-
+# ── Ricerca: DuckDuckGo ───────────────────────────────────────────────────────
 
 @lru_cache(maxsize=128)
-def _ddg_lookup(query: str, max_results: int = 2) -> tuple[str, ...]:
+def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
+    """Lista di snippet (titolo + body) per la query data."""
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
-            return tuple(
-                f"{r['title']}. {r['body']}" if r.get("title") else r["body"]
-                for r in ddgs.text(query, max_results=max_results, timeout=_TIMEOUT)
-                if len(r.get("body", "")) >= 60
-            )
+            out = []
+            for r in ddgs.text(query, max_results=max_results, timeout=_TIMEOUT):
+                body  = r.get("body", "")
+                title = r.get("title", "")
+                if body and len(body) >= 60:
+                    out.append(f"{title}. {body}" if title else body)
+            return out
     except Exception as e:
         print(f"  [RAG] DDG error: {e}")
+        return []
+
+
+# ── Embed model (lazy singleton) ─────────────────────────────────────────────
+
+_embed_model        = None
+_embed_model_tried  = False
+
+
+def _get_embed_model():
+    global _embed_model, _embed_model_tried
+    if _embed_model_tried:
+        return _embed_model
+    _embed_model_tried = True
+    try:
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer(_EMBED_MODEL_NAME)
+    except Exception as e:
+        print(f"  [RAG] Embed model unavailable: {e}")
+    return _embed_model
+
+
+@lru_cache(maxsize=512)
+def _embed(text: str) -> tuple:
+    """Return a normalized embedding as a plain tuple (hashable, lru_cache-friendly)."""
+    model = _get_embed_model()
+    if model is None:
+        return ()
+    try:
+        vec = model.encode([text[:256]], normalize_embeddings=True)[0]
+        return tuple(vec.tolist())
+    except Exception:
         return ()
 
 
-def _bm25_rank(corpus: list[str], query: str, top_k: int = 3) -> list[tuple[float, str]]:
-    if not corpus:
-        return []
-    bm25   = BM25Okapi([_tokenize(d) for d in corpus])
-    scores = bm25.get_scores(_tokenize(query))
-    return sorted(zip(scores, corpus), reverse=True)[:top_k]
+def _cosine(a: tuple, b: tuple) -> float:
+    """Dot product of two unit-norm vectors == cosine similarity."""
+    if not a or not b:
+        return 0.0
+    return sum(x * y for x, y in zip(a, b))
 
 
-def _snippet_polarity(snippet: str, option: str) -> float:
-    tokens, opt_kws = _tokenize(snippet), _keywords(option)
-    for i, tok in enumerate(tokens):
-        if tok in opt_kws and any(w in _NEGATION_TOKENS for w in tokens[max(0, i - 8): i + 8]):
-            return -1.0
-    return 1.0
+def _semantic_score(option: str, snippets: list[str], question: str) -> float:
+    """Max cosine similarity tra (question + option) e top snippets."""
+    if not snippets:
+        return 0.0
+    query_emb = _embed(f"{question} {option}"[:256])
+    if not query_emb:
+        return 0.0
+    best = 0.0
+    for snip in snippets[:3]:
+        snip_emb = _embed(snip[:256])
+        if snip_emb:
+            best = max(best, _cosine(query_emb, snip_emb))
+    return best
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
+
+def _score_option(option: str, subjects: list[str], snippets: list[str],
+                  question: str = "") -> float:
+    """Lexical + semantic scoring con batch encoding."""
+    
+    opt_kws = _keywords(option)
+    if not opt_kws:
+        return 0.0
+
+    subj_kws = {k for s in subjects for k in _keywords(s)}
+
+    # ─ LEXICAL SCORE (come prima)
+    lexical = 0.0
+    for snip in snippets:
+        if not snip:
+            continue
+        words = _tokenize(snip)
+        wset  = set(words)
+
+        opt_hits = opt_kws & wset
+        if not opt_hits:
+            continue
+        if subj_kws and not (subj_kws & wset):
+            continue
+
+        coverage   = len(opt_hits) / len(opt_kws)
+        verb_bonus = min(sum(1 for w in words if w in _RELATION_VERBS) * 0.25, 1.0)
+        lexical += coverage + verb_bonus
+
+    if not question:
+        return lexical
+
+    semantic = _semantic_score(option, snippets, question)
+
+    is_abstract = any(kw in question.lower() for kw in _ABSTRACT_KEYWORDS)
+    weight_lex, weight_sem = (0.2, 0.8) if is_abstract else (0.5, 0.5)
+    return weight_lex * lexical + weight_sem * semantic
+
+# ── Setup ────────────────────────────────────────────────────────────────────
+
+def setup_entertainment_rag() -> None:
+    """Eagerly load GLiNER and embed models. Idempotent — safe to call multiple times."""
+    global _gliner_model_tried, _embed_model_tried
+    if _gliner_model_tried and _embed_model_tried:
+        return
+
+    print("[Entertainment RAG] Loading GLiNER model...")
+    _get_gliner_model()
+
+    print("[Entertainment RAG] Loading embed model...")
+    _get_embed_model()
+
+    print("[Entertainment RAG] Ready.")
 
 
-def _extract_question_keywords(
-    question: str,
-    main_term: str,
-    subj_str: str,
-    labeled: list[tuple[str, str]],
-) -> str:
-    parts: list[str] = []
-    seen:  set[str]  = set()
-    main_lower = main_term.lower()
-    subj_lower = subj_str.lower()
+# ── Pipeline principale ───────────────────────────────────────────────────────
 
-    def _add(s: str) -> None:
-        sl = s.strip().lower()
-        if (sl and sl not in seen
-                and sl not in main_lower and main_lower not in sl
-                and sl not in subj_lower and subj_lower not in sl):
-            seen.add(sl); parts.append(s.strip())
+def rag_entertainment(query: str, option_texts: list[str] | None = None) -> str:
 
-    # Years (always useful context regardless of main_term)
-    for m in re.finditer(r'\b((?:19|20)\d{2}s?)\b', question):
-        y = m.group(1)
-        if y not in seen:
-            seen.add(y); parts.append(y)
-
-    # GLiNER entities from the question, skipping main_term and subj_str
-    for text, _ in labeled:
-        _add(text)
-
-    # Quoted terms not already covered
-    for term in _QUOTED_RE.findall(question):
-        _add(term)
-
-    # Multi-word proper nouns not already covered
-    for m in _PROPER_MULTI_RE.findall(question):
-        _add(m)
-
-    return " ".join(parts)
-
-
-def _build_queries(
-    question: str,
-    option_texts: list[str],
-    option_entities: list[str],
-    main_term: str,
-    subj_str: str,
-    labeled: list[tuple[str, str]],
-) -> list[WeightedQuery]:
-    queries: list[WeightedQuery] = []
-    q_kws = _extract_question_keywords(question, main_term, subj_str, labeled)
-    for idx, opt in enumerate(option_texts):
-        ent = option_entities[idx] if idx < len(option_entities) else ""
-        if ent:
-            opt_part = ent
-        else:
-            kws      = [w for w in _tokenize(opt) if len(w) >= 3 and w not in _STOP_WORDS]
-            opt_part = " ".join(kws[:3])
-        text = f"{main_term} {q_kws} {opt_part}".strip()[:120]
-        queries.append(WeightedQuery(text, 1.0, f"option_{idx}"))
-    return queries
-
-
-def _vote(
-    option_texts: list[str],
-    global_snips: tuple[str, ...],
-    subj_str: str,
-    question: str,
-) -> list[float]:
-    votes    = [0.0] * len(option_texts)
-    subj_kws = _keywords(subj_str)
-    pool     = list(global_snips)
-    if not pool:
-        return votes
-    for i, opt_text in enumerate(option_texts):
-        for score, snippet in _bm25_rank(pool, f"{question} {opt_text}", top_k=3):
-            subj_hits = len(subj_kws & set(_tokenize(snippet)))
-            if subj_hits:
-                votes[i] += score * subj_hits * _snippet_polarity(snippet, opt_text)
-    return votes
-
-
-def _truncate_at_sentence(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    window   = text[:max_chars]
-    last_end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
-    return window[:last_end + 1] if last_end > max_chars // 2 else window.rsplit(" ", 1)[0] + "..."
-
-
-def _build_llm_prompt(
-    question: str,
-    option_texts: list[str],
-    wiki_text: str,
-    global_snips: tuple[str, ...],
-    votes: list[float],
-    is_negative: bool,
-    low_confidence: bool = False,
-) -> str:
-    lines: list[str] = []
-    n           = len(option_texts)
-    sorted_by_vote = sorted(range(n), key=lambda i: votes[i], reverse=True)
-    rank_map       = {idx: rank for rank, idx in enumerate(sorted_by_vote)}
-
-    if is_negative:
-        lines.append("[NOT/EXCEPT: pick the option with the LEAST supporting evidence]\n")
-
-    if wiki_text:
-        lines.append(f"WIKIPEDIA:\n{wiki_text}\n")
-
-    if global_snips:
-        top = _bm25_rank(list(global_snips), question, top_k=2)
-        if top:
-            lines.append("WEB CONTEXT:")
-            for _, s in top:
-                lines.append(f"  {_truncate_at_sentence(s, 200)}")
-            lines.append("")
-
-    lines.append(f"QUESTION: {question}\n")
-    sorted_votes = sorted(votes, reverse=True)
-    margin       = sorted_votes[0] - sorted_votes[1] if len(sorted_votes) > 1 else 0.0
-
-    lines.append("OPTIONS:")
-    for i, opt in enumerate(option_texts):
-        if not low_confidence:
-            rank = rank_map[i]
-            if rank == 0 and margin > 5:
-                tag = "  [retrieval: strong]"
-            elif rank == n - 1 and margin > 5:
-                tag = "  [retrieval: weak]"
-            else:
-                tag = ""
-        else:
-            tag = ""
-        lines.append(f"[{i}] {opt}{tag}")
-
-    lines.append("\nAnswer (0/1/2/3):")
-    return "\n".join(lines)
-
-
-def rag_entertainment(
-    query: str,
-    num_results: int = 3,
-    option_texts: list[str] | None = None,
-) -> str:
-    labeled = _extract_subjects_gliner(query)
-    if labeled:
-        subjects  = [text for text, _ in labeled]
-        main_term = _pick_main_term(labeled)
-        print(f"  [ENT] GLiNER entities: {labeled}")
+    _labeled = _extract_subjects_gliner(query)
+    if _labeled:
+        subjects  = [text for text, _ in _labeled]
+        main_term = _pick_main_term(_labeled)
     else:
         subjects  = _extract_subjects_regex(query)
         main_term = subjects[0] if subjects else ""
-        print(f"  [ENT] regex subjects: {subjects}")
 
     if not main_term:
-        kws       = [w for w in _tokenize(query) if len(w) >= 4 and w not in _STOP_WORDS]
+        kws = [w for w in _tokenize(query) if len(w) >= 4 and w not in _STOP_WORDS]
         main_term = " ".join(kws[:4]) if kws else query[:60]
 
+    print(f"  [RAG] Subjects: {subjects or '(none)'} | main: {main_term!r}")
+
     subj_str = " ".join(subjects[:2]) if subjects else main_term
-    anchors  = _pick_wiki_anchors(labeled) if labeled else [main_term]
-    print(f"  [ENT] main_term={main_term!r}  subj_str={subj_str!r}  anchors={anchors}")
 
     if not option_texts:
-        wiki = _fetch_multi_wiki(anchors, query, max_chars=1200)
-        ddg  = _ddg_lookup(subj_str, num_results)
-        return "\n\n".join(filter(None, [wiki, *ddg]))[:1500]
+        wiki_full = _wiki_lookup(main_term)
+        wiki = _wiki_relevant_passages(wiki_full, query, max_chars=1200)
+        ddg  = _ddg_lookup(subj_str, 2)
+        return "\n\n".join(([wiki] if wiki else []) + ddg)[:1500]
+ 
+    n_opts = min(len(option_texts), 4)
 
-    n_opts          = min(len(option_texts), 4)
-    option_entities = [_extract_option_entity(opt) for opt in option_texts[:n_opts]]
-    print(f"  [ENT] option_entities={list(zip(option_texts[:n_opts], option_entities))}")
-    queries = _build_queries(query, list(option_texts[:n_opts]), option_entities, main_term, subj_str, labeled)
-    print(f"  [ENT] queries={[(q.strategy, q.text) for q in queries]}")
+    cand_queries = [
+        f"{_clean_query_text(option_texts[i])[:50]} {subj_str}".strip()[:90]
+        for i in range(n_opts)
+    ]
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 2)
+    wiki_fut    = pool.submit(_wiki_lookup, main_term)
+    general_fut = pool.submit(_ddg_lookup, f"{subj_str} {query[:50]}".strip()[:90], 2)
+    opt_futs    = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
 
     def _safe(fut, default):
-        try:   return fut.result(timeout=_TIMEOUT + 1)
-        except Exception: return default
+        try:
+            return fut.result(timeout=_TIMEOUT + 1)
+        except Exception:
+            return default
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries) + 1) as pool:
-        wiki_fut    = pool.submit(_fetch_multi_wiki, anchors, query, 1200)
-        query_futs  = [pool.submit(_ddg_lookup, q.text, 2) for q in queries]
-        wiki_text   = _safe(wiki_fut, "")
-        query_snips = [_safe(f, ()) for f in query_futs]
+    wiki_full    = _safe(wiki_fut, "")
+    general_snip = _safe(general_fut, [])
+    opt_snips    = [_safe(f, []) for f in opt_futs]
+    pool.shutdown(wait=False)
 
-    seen_keys: set[str] = set()
-    global_snips_list: list[str] = []
-    for snips in query_snips:
-        for s in snips:
-            k = s[:120]
-            if k not in seen_keys:
-                seen_keys.add(k)
-                global_snips_list.append(s)
+    wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=1400)
 
-    global_snips = tuple(global_snips_list)
-    print(f"  [ENT] wiki chars={len(wiki_text)}  global_snips={len(global_snips)}")
+    shared: list[str] = []
+    seen_key: set[str] = set()
+    for s in ([wiki_text] if wiki_text else []) + general_snip:
+        k = s[:120]
+        if k not in seen_key:
+            seen_key.add(k)
+            shared.append(s)
 
-    has_any_entity = bool(labeled)
-    has_any_snips  = len(global_snips) >= 2
-    if not has_any_entity and not wiki_text and not has_any_snips:
-        print("  [ENT] Low confidence -> LLM fallback")
+    # Scoring per ogni opzione 
+    scores: dict[int, float] = {}
+    for i in range(n_opts):
+        scores[i] = _score_option(option_texts[i], subjects,
+                                  opt_snips[i] + shared, query)
+
+    ranked = sorted(range(n_opts), key=lambda i: scores[i], reverse=True)
+    print(f"  [RAG] Scores: { {i: round(scores[i], 1) for i in ranked} }")
+
+    # ── Fallback su conoscenza LLM se nessuna evidenza ────────────────────────
+    if not shared and all(s == 0.0 for s in scores.values()):
+        print("  [RAG] No evidence → LLM fallback")
         return ""
 
-    votes          = _vote(list(option_texts[:n_opts]), global_snips, subj_str, query)
-    is_negative    = bool(_NOT_EXCEPT_RE.search(query))
-    max_vote       = max(votes) if votes else 0.0
-    low_confidence = max_vote < _VOTE_CONFIDENCE_MIN
-    winner         = (min if is_negative else max)(range(n_opts), key=lambda i: votes[i])
-    print(f"  [ENT] votes={votes}  is_negative={is_negative}  winner=[{winner}]  low_confidence={low_confidence}")
-
-    return _build_llm_prompt(
-        question=query, option_texts=list(option_texts[:n_opts]),
-        wiki_text=wiki_text, global_snips=global_snips,
-        votes=votes, is_negative=is_negative, low_confidence=low_confidence,
+    parts: list[str] = []
+    if wiki_text:
+        parts.append(f"WIKIPEDIA (key passages):\n{wiki_text}")
+ 
+    # Marca esplicitamente il vincitore: contrasta l'allucinazione del LLM
+    top_idx = ranked[0]
+    top_score = scores[top_idx]
+    has_clear_winner = top_score > 0 and (
+        len(ranked) < 2 or top_score >= scores[ranked[1]] * 1.5
     )
+
+    for i in ranked:
+        marker = " ★ STRONGEST EVIDENCE" if (i == top_idx and has_clear_winner) else ""
+        label  = f"[{i}] {option_texts[i]} (score {scores[i]:.1f}){marker}"
+        if opt_snips[i]:
+            parts.append(f"{label}:\n{opt_snips[i][0][:350]}")
+        else:
+            parts.append(f"{label}: (no specific evidence)")
+ 
+    return "\n\n".join(parts)[:2500]
