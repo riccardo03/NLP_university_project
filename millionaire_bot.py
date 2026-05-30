@@ -71,14 +71,15 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
     )
-    _tokenizer = AutoTokenizer.from_pretrained(model_name)
+    _tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
         quantization_config=quantization_config,
         trust_remote_code=True,  # required for Qwen
+        torch_dtype=torch.float16
     )
-    _model.config.max_length = None
+    #_model.config.max_length = None
     _model.generation_config = GenerationConfig(
         pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
         eos_token_id=_tokenizer.eos_token_id,
@@ -91,22 +92,16 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     print("The model is ready to answer.")
 
     try:
-        import rag_entertainment as _rag_ent
-        _rag_ent.setup_entertainment_rag()
-    except Exception as e:
-        print(f"Warning: entertainment RAG setup failed: {e}")
-
-    try:
         import rag_science as _rag_sci
         _rag_sci.setup_science_rag()
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
 
-    try:
-        import rag_maths as _rag_mth
+    """try:
+        import rag_math as _rag_mth
         _rag_mth.setup_maths_rag(llm_callback=_pipe_call)
     except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")
+        print(f"Warning: maths RAG setup failed: {e}")"""
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
