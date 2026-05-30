@@ -74,12 +74,11 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto",
+        device_map={": 0"},
         quantization_config=quantization_config,
         #trust_remote_code=True,  # required for Qwen
         torch_dtype=torch.float16, 
         trust_remote_code=True,
-        low_cpu_mem_usage=True,
     )
     #_model.config.max_length = None
     _model.generation_config = GenerationConfig(
