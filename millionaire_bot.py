@@ -71,12 +71,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
     )
-    _tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
         quantization_config=quantization_config,
-        trust_remote_code=True,  # required for Qwen
+        #trust_remote_code=True,  # required for Qwen
         torch_dtype=torch.float16
     )
     #_model.config.max_length = None
