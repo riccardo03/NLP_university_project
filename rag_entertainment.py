@@ -69,6 +69,19 @@ def _get_gliner_model():
     return _gliner_model
 
 
+def set_entertainment_rag() -> None:
+    """Eagerly load GLiNER. Idempotent."""
+    global _gliner_model_tried
+    if _gliner_model_tried:
+        return
+    print("[Entertainment RAG] Loading GLiNER model...")
+    _get_gliner_model()
+    if _gliner_model is not None:
+        print(f"[Entertainment RAG] GLiNER ready ({_GLINER_MODEL_NAME}).")
+    else:
+        print("[Entertainment RAG] GLiNER unavailable; will fall back to regex extraction.")
+
+
 def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 

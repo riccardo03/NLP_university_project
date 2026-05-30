@@ -1,4 +1,6 @@
+import os
 import re
+import tempfile
 import time
 import warnings
 
@@ -41,9 +43,10 @@ _MAX_TOKENS = {
     COMP_NEWS:             100,
 }
 
-_model     = None
-_tokenizer = None
-_pipe      = None
+_model         = None
+_tokenizer     = None
+_pipe          = None
+_whisper_model = None
 
 def _pipe_call(messages, max_new_tokens: int) -> str:
     try:
@@ -74,10 +77,8 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     _tokenizer = AutoTokenizer.from_pretrained(model_name)
     _model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map={": 0"},
+        device_map="auto",
         quantization_config=quantization_config,
-        #trust_remote_code=True,  # required for Qwen
-        torch_dtype=torch.float16, 
         trust_remote_code=True,
     )
     #_model.config.max_length = None
@@ -98,11 +99,181 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: science RAG setup failed: {e}")
 
+    try:
+        import rag_entertainment as _rag_ent
+        _rag_ent.set_entertainment_rag()
+    except Exception as e:
+        print(f"Warning: entertainment RAG setup failed: {e}")
+
     """try:
         import rag_math as _rag_mth
         _rag_mth.setup_maths_rag(llm_callback=_pipe_call)
     except Exception as e:
         print(f"Warning: maths RAG setup failed: {e}")"""
+
+
+def load_speech_model(model_name: str = "small") -> None:
+    """Load an OpenAI Whisper ASR model for speech-mode transcription.
+
+    The loaded model is stored in the module-level _whisper_model and used
+    by transcribe_bytes().  Requires the openai-whisper package.
+    """
+    global _whisper_model
+    try:
+        import whisper as _whisper_lib
+    except ImportError:
+        raise ImportError("Run:  %pip install -q openai-whisper")
+    print(f"Loading Whisper '{model_name}' model...")
+    _whisper_model = _whisper_lib.load_model(model_name)
+    print("Whisper ready.")
+
+
+def transcribe_bytes(audio_bytes: bytes, prompt: str = "") -> str:
+    """Write WAV bytes to a temp file, run Whisper, and return the transcript."""
+    if _whisper_model is None:
+        raise RuntimeError("Call load_speech_model() before transcribing.")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        tmp = f.name
+    try:
+        result = _whisper_model.transcribe(tmp, language="en", fp16=False, initial_prompt=prompt)
+        return result["text"].strip()
+    finally:
+        os.unlink(tmp)
+
+
+def extract_option_content(transcribed: str) -> str:
+    """Strip the option-label prefix from a Whisper-transcribed option string.
+    Examples:
+        'Option A, bread'            -> 'bread'
+        'Option B. The Sun.'         -> 'The Sun.'
+        'Topsy and D, it is the sun' -> 'it is the sun'
+    """
+    match = re.search(r'[,\.]\s*(.+)', transcribed)
+    if match:
+        return match.group(1).strip()
+    return transcribed.strip()
+
+
+def play_speech_game(client, comp_id: int) -> dict:
+    """Play a competition in speech mode using Whisper ASR.
+
+    Identical pipeline to play_game() but reads question and option text
+    from WAV audio (server TTS) transcribed by Whisper instead of the
+    server text field.  Falls back to the server text field if audio
+    transcription fails.  The returned log is compatible with
+    print_evaluation().
+    """
+    from millionaire_client.exceptions import GameError
+
+    game      = client.game.start(competition_id=comp_id, mode="speech")
+    comp_name = COMP_NAMES.get(comp_id, f"Competition {comp_id}")
+
+    log = {
+        "competition":      comp_id,
+        "competition_name": comp_name,
+        "level_reached":    0,
+        "earnings":         0.0,
+        "questions":        [],
+    }
+
+    print(f"\n{'='*60}")
+    print(f"  Starting (SPEECH): {comp_name}")
+    print(f"{'='*60}")
+
+    while game.in_progress:
+        question = game.current_question
+        if not question:
+            print("No question available — game ended.")
+            break
+
+        level     = game.current_level
+        time_left = game.time_remaining or 30.0
+
+        print(f"\n--- Level {level} | Time: {time_left:.1f}s ---")
+
+        # Transcribe question audio; fall back to server text on failure
+        try:
+            q_audio = game.fetch_audio_question()
+            q_text  = transcribe_bytes(q_audio, prompt="Science question")
+            print(f"  [Whisper] Q: {q_text}")
+        except Exception as e:
+            print(f"  [Whisper] Q audio failed: {e}. Using server text.")
+            q_text = question.text
+
+        # Transcribe each option audio sequentially (A → B → C → D).
+        # The 30-second timer starts only after the last fetch completes.
+        real_opts = question.options
+        opt_texts = []
+        for real_opt in real_opts:
+            try:
+                opt_audio = game.fetch_audio_option_next()
+                raw       = transcribe_bytes(opt_audio, prompt="Answer option, one short phrase:")
+                cleaned   = extract_option_content(raw)
+                opt_texts.append(cleaned)
+                print(f"    [{real_opt.id}] '{raw}' -> '{cleaned}'")
+            except GameError:
+                # No audio available for this option; use the text field
+                opt_texts.append(real_opt.text)
+
+        # Build lightweight option objects with real server IDs + transcribed texts
+        class _SpeechOpt:
+            def __init__(self, id_, text): self.id, self.text = id_, text
+
+        speech_opts = [_SpeechOpt(real_opts[i].id, opt_texts[i])
+                       for i in range(len(real_opts))]
+
+        # RAG retrieval + LLM inference (same pipeline as text mode)
+        print("  [RAG] Searching for context...")
+        t0      = time.time()
+        context = get_context(comp_id, q_text, opt_texts)
+        print(f"  [RAG] Done in {time.time() - t0:.1f}s. Context: {context[:120].replace(chr(10), ' ')}...")
+
+        user_prompt = build_user_prompt(q_text, speech_opts, context)
+        print("  [LLM] Thinking...")
+        t1         = time.time()
+        raw_output = generate_answer(SYSTEM_PROMPTS[comp_id], user_prompt,
+                                     max_new_tokens=_MAX_TOKENS[comp_id])
+        answer_id  = extract_answer_id(raw_output, num_options=len(speech_opts))
+        print(f"  [LLM] Output: '{raw_output}' -> Answer ID: {answer_id} (in {time.time() - t1:.1f}s)")
+
+        q_record = {
+            "level":        level,
+            "question":     q_text,
+            "options":      [{"id": o.id, "text": o.text} for o in speech_opts],
+            "model_answer": answer_id,
+            "correct":      None,
+            "timed_out":    False,
+        }
+
+        result = game.answer(answer_id)
+
+        q_record["correct"]   = result.correct
+        q_record["timed_out"] = result.timed_out
+        log["questions"].append(q_record)
+
+        if result.timed_out:
+            print("  TIMED OUT!")
+            log["level_reached"] = level
+            log["earnings"]      = result.earned_amount
+            break
+        elif result.correct:
+            print(f"  CORRECT! Earned so far: ${result.earned_amount:,.2f}")
+            log["level_reached"] = level
+            log["earnings"]      = result.earned_amount
+            if result.game_over:
+                print("  GAME COMPLETE! All questions answered!")
+        else:
+            print(f"  WRONG! Game over. Earned: ${result.earned_amount:,.2f}")
+            log["level_reached"] = level
+            log["earnings"]      = result.earned_amount
+            break
+
+    print(f"\n{'='*60}")
+    print(f"  {comp_name} (SPEECH) — Level reached: {log['level_reached']} | Earnings: ${log['earnings']:,.2f}")
+    print(f"{'='*60}\n")
+
+    return log
 
 
 def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
@@ -138,15 +309,12 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are an entertainment expert answering multiple-choice questions about films, TV shows, music, actors, directors, and celebrities.\n"
-        "You may receive structured retrieval context with up to two sections:\n"
-        "  • WIKIPEDIA (key passages) — factual background on the subject.\n"
-        "  • Per-option evidence blocks ranked by relevance score. The option marked '★ STRONGEST EVIDENCE' has the most supporting text.\n"
+        "You are an expert on films, TV shows, music, actors, directors, and celebrities.\n"
+        "A Context block of Wikipedia excerpts and web snippets may be provided.\n"
         "Rules:\n"
-        "1. If an option is marked '★ STRONGEST EVIDENCE' AND its snippet clearly supports the answer, choose that option.\n"
-        "2. If scores are close or the snippets are weakly related, rely on your own entertainment knowledge.\n"
-        "3. If no context is provided, answer entirely from your own knowledge.\n"
-        "4. Never choose an option solely because it has a high score — read the snippet to confirm.\n"
+        "1. If the Context explicitly names or confirms one of the options, choose it.\n"
+        "2. If the Context is off-topic, ambiguous, or absent, answer from your own knowledge.\n"
+        "3. Never let the Context override a fact you know with certainty to be true.\n"
         "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3).\n"
         "Then one sentence explaining why."
     ),
