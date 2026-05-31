@@ -1,18 +1,37 @@
 """
-Pipeline:
-  1. Extract subjects from the question (named entities / proper nouns).
-  2. Fetch Wikipedia (main subject) + DuckDuckGo (per-option queries) in parallel.
-  3. Assemble deduplicated context and return it for the LLM to reason over.
+Entertainment RAG: Wikipedia (cached) + DDG article fetch → LLM prompt.
+Subject extraction uses GLiNER with entertainment-specific entity labels.
 """
 
 import re
 import concurrent.futures
 import urllib.parse
+import html as _html_module
 import requests
 from functools import lru_cache
 
-_WIKI_UA = "QuizBot/1.0 (research)"
-_TIMEOUT = 4
+_WIKI_UA           = "QuizBot/1.0 (research)"
+_TIMEOUT           = 4
+_ARTICLE_MAX_CHARS = 4000
+_MIN_ARTICLE_CHARS = 300
+_MAX_DDG_RESULTS   = 3
+
+_SKIP_DOMAINS: frozenset[str] = frozenset({
+    "youtube.com",
+    "instagram.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "linkedin.com",
+    "reddit.com",
+    "vk.com",
+    "t.me",
+})
+
+_SKIP_URL_PATTERNS: frozenset[str] = frozenset({
+    "/tag/", "/tags/", "/category/", "/categories/",
+    "/topic/", "/topics/", "/search/", "/archive/",
+})
 
 _STOP_WORDS = {
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
@@ -44,17 +63,28 @@ _GLINER_LABEL_PRIORITY: dict[str, int] = {
 _TITLE_LABELS  = frozenset({"movie", "film", "TV show", "TV series"})
 _PERSON_LABELS = frozenset({"person", "actor", "musician", "director", "band", "music group"})
 
-_QUOTED_RE        = re.compile(r"""['\"‘’“”]([\w][\w\s,.\-&!]{1,58}?)['\"‘’“”]""")
+_QUOTED_RE        = re.compile(r"""['\"''“”]([\w][\w\s,.\-&!]{1,58}?)['\"''“”]""")
 _PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
 _PROPER_SINGLE_RE = re.compile(r'^[A-ZÀ-Ý][a-zA-ZÀ-ÿ]{2,}$')
 _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
+_BLOCK_TAG_RE     = re.compile(
+    r'<(script|style|nav|header|footer|aside|noscript)[^>]*>.*?</\1>',
+    re.DOTALL | re.IGNORECASE,
+)
+_TAG_RE   = re.compile(r'<[^>]+>')
+_WS_RE    = re.compile(r'\s+')
+_P_TAG_RE = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
 
 # GLiNER lazy singleton
 _gliner_model       = None
 _gliner_model_tried = False
 
+
+# ---------------------------------------------------------------------------
+# GLiNER
+# ---------------------------------------------------------------------------
 
 def _get_gliner_model():
     global _gliner_model, _gliner_model_tried
@@ -81,6 +111,10 @@ def set_entertainment_rag() -> None:
     else:
         print("[Entertainment RAG] GLiNER unavailable; will fall back to regex extraction.")
 
+
+# ---------------------------------------------------------------------------
+# Subject extraction
+# ---------------------------------------------------------------------------
 
 def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
@@ -151,6 +185,41 @@ def _pick_main_term(labeled: list[tuple[str, str]]) -> str:
     return labeled[0][0] if labeled else ""
 
 
+# ---------------------------------------------------------------------------
+# HTML stripping
+# ---------------------------------------------------------------------------
+
+def _strip_html(raw: str) -> str:
+    text = _BLOCK_TAG_RE.sub(" ", raw)
+    text = _TAG_RE.sub(" ", text)
+    text = _html_module.unescape(text)
+    text = _WS_RE.sub(" ", text)
+    return text.strip()
+
+
+def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
+    paragraphs = _P_TAG_RE.findall(raw_html)
+    body_parts: list[str] = []
+    total = 0
+
+    for p in paragraphs:
+        clean = _WS_RE.sub(" ", _TAG_RE.sub("", _html_module.unescape(p))).strip()
+        if len(clean) >= 80:
+            body_parts.append(clean)
+            total += len(clean) + 1
+            if total >= max_chars:
+                break
+
+    if body_parts:
+        return " ".join(body_parts)[:max_chars]
+
+    return _strip_html(raw_html)[:max_chars]
+
+
+# ---------------------------------------------------------------------------
+# Wikipedia (cached — entertainment facts are stable)
+# ---------------------------------------------------------------------------
+
 @lru_cache(maxsize=64)
 def _wiki_lookup(query: str) -> str:
     try:
@@ -217,73 +286,162 @@ def _wiki_relevant_passages(wiki_text: str, question: str, max_chars: int = 1500
     return "\n\n".join(out)
 
 
-@lru_cache(maxsize=128)
-def _ddg_lookup(query: str, max_results: int = 2) -> list[str]:
+# ---------------------------------------------------------------------------
+# DDG search + article fetch
+# ---------------------------------------------------------------------------
+
+def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[str]:
     try:
         from ddgs import DDGS
+        urls = []
         with DDGS() as ddgs:
-            out = []
             for r in ddgs.text(query, max_results=max_results, timeout=_TIMEOUT):
-                body  = r.get("body", "")
-                title = r.get("title", "")
-                if body and len(body) >= 60:
-                    out.append(f"{title}. {body}" if title else body)
-            return out
+                url = r.get("href") or r.get("url", "")
+                if url:
+                    urls.append(url)
+        return urls
     except Exception as e:
-        print(f"  [RAG] DDG error: {e}")
+        print(f"  [RAG-Entertainment] DDG error: {e}")
         return []
 
 
-def rag_entertainment(query: str, num_results: int = 3, option_texts: list = None) -> str:
+def _fetch_article(url: str) -> str:
+    try:
+        r = requests.get(
+            url,
+            timeout=(_TIMEOUT, _TIMEOUT),
+            headers={"User-Agent": "Mozilla/5.0 (compatible; EntertainmentBot/1.0)"},
+        )
+        if r.status_code != 200:
+            return ""
+        return _extract_body(r.text)
+    except Exception:
+        return ""
+
+
+def _search_and_fetch(query: str, q_keywords: set[str]) -> tuple[str, str]:
+    for url in _ddg_search(query):
+        if any(domain in url for domain in _SKIP_DOMAINS):
+            print(f"  [Entertainment] skipping: {url[:80]}")
+            continue
+        if any(pat in url for pat in _SKIP_URL_PATTERNS):
+            print(f"  [Entertainment] skipping: {url[:80]}")
+            continue
+        text = _fetch_article(url)
+        if text and len(text) >= _MIN_ARTICLE_CHARS and any(kw in text.lower() for kw in q_keywords):
+            return text, url
+    return "", ""
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def setup_entertainment_rag() -> None:
+    """Alias kept for callers that use the newer name."""
+    set_entertainment_rag()
+
+
+def rag_entertainment(query: str, option_texts: list = None) -> str:
+    # --- subject extraction ---
     labeled = _extract_subjects_gliner(query)
     if labeled:
         subjects  = [text for text, _ in labeled]
         main_term = _pick_main_term(labeled)
+        print(f"  [Entertainment] GLiNER entities: {labeled}")
     else:
         subjects  = _extract_subjects_regex(query)
         main_term = subjects[0] if subjects else ""
+        print(f"  [Entertainment] regex subjects: {subjects}")
 
     if not main_term:
         kws = [w for w in _tokenize(query) if len(w) >= 4 and w not in _STOP_WORDS]
         main_term = " ".join(kws[:4]) if kws else query[:60]
 
-    subj_str = " ".join(subjects[:2]) if subjects else main_term
+    # --- keyword sets for scoring ---
+    q_keywords = {
+        t for t in _tokenize(query)
+        if len(t) >= 4 and t not in _STOP_WORDS
+    }
+    option_kw = {
+        t for opt in (option_texts or [])
+        for t in _tokenize(opt)
+        if len(t) >= 3 and t not in _STOP_WORDS
+    }
 
-    if not option_texts:
-        wiki = _wiki_relevant_passages(_wiki_lookup(main_term), query, max_chars=1200)
-        ddg  = _ddg_lookup(subj_str, num_results)
-        return "\n\n".join(filter(None, [wiki, *ddg]))[:1500]
+    # --- build queries ---
+    subject_tokens  = {s.lower() for s in subjects}
+    q_content_words = [
+        t for t in _tokenize(query)
+        if len(t) >= 5 and t not in _STOP_WORDS and t not in subject_tokens
+    ]
+    synth_query = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
 
-    n_opts = min(len(option_texts), 4)
-    cand_queries = [
-        f"{_clean_query_text(option_texts[i])[:50]} {subj_str}".strip()[:90]
+    n_opts = min(len(option_texts), 4) if option_texts else 0
+    option_queries = [
+        " ".join(filter(None, [main_term, _clean_query_text(option_texts[i])[:50]]))
         for i in range(n_opts)
     ]
 
-    pool        = concurrent.futures.ThreadPoolExecutor(max_workers=n_opts + 2)
-    wiki_fut    = pool.submit(_wiki_lookup, main_term)
-    general_fut = pool.submit(_ddg_lookup, f"{subj_str} {query[:50]}".strip()[:90], num_results)
-    opt_futs    = [pool.submit(_ddg_lookup, q, 2) for q in cand_queries]
+    queries = list(dict.fromkeys(q for q in [synth_query] + option_queries if q.strip()))
+    print(f"  [Entertainment] queries: {queries}")
 
-    def _safe(fut, default):
+    # --- parallel: Wikipedia + DDG article fetch ---
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries) + 1) as pool:
+        wiki_fut  = pool.submit(_wiki_lookup, main_term)
+        fetch_futs = {
+            pool.submit(_search_and_fetch, q, q_keywords): q for q in queries
+        }
+
+        wiki_full = ""
         try:
-            return fut.result(timeout=_TIMEOUT + 1)
+            wiki_full = wiki_fut.result(timeout=_TIMEOUT + 1)
         except Exception:
-            return default
+            pass
 
-    wiki_full    = _safe(wiki_fut, "")
-    general_snip = _safe(general_fut, [])
-    opt_snips    = [_safe(f, []) for f in opt_futs]
-    pool.shutdown(wait=False)
+        candidates: list[tuple[int, str, str]] = []
+        for fut in concurrent.futures.as_completed(fetch_futs):
+            try:
+                text, url = fut.result(timeout=_TIMEOUT + 2)
+            except Exception:
+                continue
+            if text:
+                score = (
+                    sum(2 for kw in option_kw   if kw in text.lower()) +
+                    sum(1 for kw in q_keywords   if kw in text.lower())
+                )
+                candidates.append((score, text, url))
+                print(f"  [Entertainment] candidate (score={score}, {len(text)} chars): {url[:80]}")
 
+    # --- select best article ---
     wiki_text = _wiki_relevant_passages(wiki_full, query, max_chars=1400)
 
-    all_snippets: list[str] = []
-    seen_key: set[str] = set()
-    for s in filter(None, [wiki_text, *general_snip, *(s for snips in opt_snips for s in snips)]):
-        k = s[:120]
-        if k not in seen_key:
-            seen_key.add(k)
-            all_snippets.append(s)
+    article_text = ""
+    article_url  = ""
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _, article_text, article_url = candidates[0]
+        print(f"  [Entertainment] selected article: {article_url[:80]}")
+    else:
+        print("  [Entertainment] No article found — Wikipedia only")
 
-    return "\n\n".join(all_snippets)[:2500]
+    # --- assemble structured prompt ---
+    lines: list[str] = []
+    if wiki_text:
+        lines += [f"WIKIPEDIA (source: https://en.wikipedia.org/wiki/{urllib.parse.quote(main_term)}):", wiki_text, ""]
+    if article_text:
+        lines += [f"ARTICLE (source: {article_url}):", article_text, ""]
+
+    if not lines:
+        print("  [Entertainment] No context found — LLM fallback")
+        return ""
+
+    lines += [f"QUESTION: {query}", ""]
+    if option_texts:
+        lines.append("OPTIONS:")
+        for i, opt in enumerate(option_texts[:4]):
+            lines.append(f"[{i}] {opt}")
+        lines.append("")
+    lines.append("Answer (0/1/2/3):")
+
+    return "\n".join(lines)
