@@ -105,12 +105,6 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: entertainment RAG setup failed: {e}")
 
-def clean_option_text(text: str) -> str:
-    # remove "option A/B/C/D", "A)", "B.", etc.
-    text = re.sub(r"(?i)\boption\s*[a-d]\b[:\.\)]?", "", text)
-    text = re.sub(r"^[A-Da-d][\)\.\-:]\\s*", "", text)
-
-    return text.strip()
 
 def load_speech_model(model_name: str = "large-v3") -> None:
     global _whisper_model
@@ -127,25 +121,33 @@ def load_speech_model(model_name: str = "large-v3") -> None:
 
     print("Whisper ready.")
 
-MCQ_PROMPT = "Multiple choice quiz. Question followed by four answer choices."
+# Short, neutral biasing context for Whisper. It nudges the decoder toward a
+# clean trivia transcription without instructing it to preserve literal speech
+# artifacts (the old "keep exactly as spoken" style caused label injection and
+# was sometimes copied verbatim into the output).
+MCQ_PROMPT = (
+    "A clearly spoken trivia question and its answer choices. "
+    "Transcribe the meaning accurately in clean English."
+)
 
 MCQ_PARSE_PROMPT = """You are an expert quiz parser and ASR transcript corrector.
 
-The input is a raw Whisper speech-to-text transcript of a multiple choice question.
-It may contain speech-recognition errors: misspelled words, phonetically similar substitutions, garbled proper nouns.
+The input is a raw speech-to-text transcript of a multiple-choice question and its answer options. It may contain recognition errors: misspelled or phonetically garbled words, stray labels, or filler.
 
 YOUR TASKS:
-1. Strip any option-label prefix from answer values (e.g. "Option A,", "A)", "(A)", "A.").
-2. Extract the core question text, removing any trailing artifacts or noise.
-3. Fix clear speech-recognition errors using context from the question and the other options:
-   - Correct misspelled or phonetically garbled words when the intended word is clear from context.
-   - Do NOT change the factual meaning or invent facts absent from the transcript.
-4. Return valid JSON only — no markdown, no explanation.
+1. Remove any option-label prefixes from answers (e.g. "Option A", "A)", "(A)", "A.", "Answer:").
+2. Extract the clean question text, dropping noise and trailing artifacts.
+3. Correct clear speech-recognition errors using context, WITHOUT changing the factual meaning or inventing facts.
+4. Normalize formatting:
+   - Use natural capitalization and punctuation.
+   - Write dates in ISO 8601 (YYYY-MM-DD, or YYYY-MM, or YYYY when only the year is given).
+5. Do not assume a fixed question type — handle any topic.
+6. Return valid JSON only, no markdown or explanation.
 
 OUTPUT FORMAT:
 {"questions":[{"question":"...","A":"...","B":"...","C":"...","D":"..."}]}
 
-If an option is missing use "".
+Use "" for any option that is missing.
 """
 
 
@@ -175,11 +177,65 @@ def transcribe_bytes(audio_bytes: bytes, prompt: str = "") -> str:
         os.unlink(tmp_path)
 
 
-_OPT_LABEL = re.compile(r'^\s*(?:[Oo]ption\s+)?[A-Da-d][.),:]\s*')
+# ---------------------------------------------------------------------------
+# MCQ normalization layer
+# ---------------------------------------------------------------------------
+# Words a TTS/ASR pass may prepend to an option but that are never part of the
+# actual answer. Matched case-insensitively against leading tokens.
+_OPTION_LABEL_WORDS = {"option", "answer", "choice", "letter"}
+# Punctuation that may cling to a leading letter marker ("B." / "B)" / "(B)").
+_LABEL_PUNCT = ".,):;(-"
 
 
-def _strip_option_label(text: str) -> str:
-    return _OPT_LABEL.sub("", text).strip()
+def normalize_option(text: str) -> str:
+    """Clean a single ASR-transcribed answer option using plain string ops.
+
+    Strips leading label artifacts ("Option A", "Answer:", "B)") and tidies
+    spacing/capitalization so a clean phrase reaches the LLM. Deliberately
+    avoids regex per the robustness requirements.
+    """
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+
+    # Peel leading label tokens one at a time: handles "Option", "B.", "Answer:"
+    # and combinations like "Option B." (at most a label word + a letter marker).
+    for _ in range(3):
+        parts = cleaned.split(None, 1)
+        if not parts:
+            break
+        head = parts[0].lower().strip(_LABEL_PUNCT)
+        is_label_word = head in _OPTION_LABEL_WORDS
+        is_letter_marker = len(head) == 1 and head in "abcd"
+        if is_label_word or is_letter_marker:
+            cleaned = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            break
+
+    # Drop any leftover leading separator and collapse internal whitespace.
+    cleaned = cleaned.lstrip(_LABEL_PUNCT + " ").strip()
+    cleaned = " ".join(cleaned.split())
+
+    # Sentence-case the first character if it came through lowercased.
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    return cleaned
+
+
+def _is_valid_option(text: str) -> bool:
+    """Reject empty strings and pure label/letter fragments (not real content).
+
+    A single real word (e.g. "Paris", "Evil") is considered valid; only
+    label artifacts with no payload are rejected.
+    """
+    if not text or not text.strip():
+        return False
+    low = text.strip().lower().strip(_LABEL_PUNCT).strip()
+    if low in _OPTION_LABEL_WORDS or low in {"a", "b", "c", "d"}:
+        return False
+    return True
 
 
 def _extract_json(text: str) -> dict:
@@ -284,7 +340,15 @@ def play_speech_game(client, comp_id: int) -> dict:
         except Exception as e:
             print(f"  [Qwen MCQ] Parse failed: {e}. Using raw transcriptions.")
             q_text    = q_raw
-            opt_texts = [_strip_option_label(t) for t in opt_raws]
+            opt_texts = list(opt_raws)
+
+        # Normalization + validation gate — applied on BOTH paths so no raw
+        # Whisper artifact ("Option B.", "Answer", stray labels) can reach the
+        # RAG/LLM stage. Invalid options fall back to the server text, re-cleaned.
+        opt_texts = [normalize_option(t) for t in opt_texts]
+        for i, t in enumerate(opt_texts):
+            if not _is_valid_option(t) and i < len(real_opts):
+                opt_texts[i] = normalize_option(real_opts[i].text)
 
         print(f"  [Whisper+Qwen] Q: {q_text}")
         for i, t in enumerate(opt_texts):
