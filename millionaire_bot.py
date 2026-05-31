@@ -175,16 +175,36 @@ def transcribe_bytes(audio_bytes: bytes, prompt: str = "") -> str:
         os.unlink(tmp_path)
 
 
+_OPT_LABEL = re.compile(r'^\s*(?:[Oo]ption\s+)?[A-Da-d][.),:]\s*')
+
+
+def _strip_option_label(text: str) -> str:
+    return _OPT_LABEL.sub("", text).strip()
+
+
+def _extract_json(text: str) -> dict:
+    """Extract the first balanced JSON object from text, ignoring trailing content."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in model output")
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : i + 1])
+    raise ValueError("Unbalanced braces in model output")
+
+
 def parse_mcq_with_qwen(raw_text: str):
     messages = [
         {"role": "system", "content": MCQ_PARSE_PROMPT},
         {"role": "user", "content": raw_text},
     ]
     result = _pipe_call(messages, max_new_tokens=512)
-    # Strip markdown code fences the model may add
-    result = re.sub(r"^```(?:json)?\s*", "", result.strip())
-    result = re.sub(r"\s*```$", "", result.strip())
-    return json.loads(result)
+    return _extract_json(result)
 
 def transcribe_and_parse_mcq(audio_path: str):
     raw_text = transcribe_audio(audio_path)
@@ -264,7 +284,7 @@ def play_speech_game(client, comp_id: int) -> dict:
         except Exception as e:
             print(f"  [Qwen MCQ] Parse failed: {e}. Using raw transcriptions.")
             q_text    = q_raw
-            opt_texts = opt_raws
+            opt_texts = [_strip_option_label(t) for t in opt_raws]
 
         print(f"  [Whisper+Qwen] Q: {q_text}")
         for i, t in enumerate(opt_texts):
