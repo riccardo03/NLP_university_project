@@ -12,9 +12,9 @@ from functools import lru_cache
 
 _WIKI_UA           = "QuizBot/1.0 (research)"
 _TIMEOUT           = 4
-_ARTICLE_MAX_CHARS = 4000
+_ARTICLE_MAX_CHARS = 10000
 _MIN_ARTICLE_CHARS = 300
-_MAX_DDG_RESULTS   = 3
+_MAX_DDG_RESULTS   = 2
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "youtube.com",
@@ -377,7 +377,7 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
     ]
     synth_query = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
 
-    n_opts = min(len(option_texts), 4) if option_texts else 0
+    n_opts = min(len(option_texts), 3) if option_texts else 0
     option_queries = [
         " ".join(filter(None, [main_term, _clean_query_text(option_texts[i])[:50]]))
         for i in range(n_opts)
