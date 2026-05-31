@@ -129,15 +129,18 @@ def load_speech_model(model_name: str = "large-v3") -> None:
 
 MCQ_PROMPT = "Multiple choice quiz. Question followed by four answer choices."
 
-MCQ_PARSE_PROMPT = """You are an expert quiz parser.
+MCQ_PARSE_PROMPT = """You are an expert quiz parser and ASR transcript corrector.
 
-Convert the transcript below into structured JSON.
+The input is a raw Whisper speech-to-text transcript of a multiple choice question.
+It may contain speech-recognition errors: misspelled words, phonetically similar substitutions, garbled proper nouns.
 
-RULES:
-- Strip any option-label prefix from answer values: remove patterns like "Option A,", "Option B.", "A)", "(A)", "A." before the actual answer text.
-- Extract only the core question text (no trailing artifacts).
-- Do NOT invent words. Do NOT summarize. Only reorganize.
-- Return valid JSON only — no markdown fences, no explanations.
+YOUR TASKS:
+1. Strip any option-label prefix from answer values (e.g. "Option A,", "A)", "(A)", "A.").
+2. Extract the core question text, removing any trailing artifacts or noise.
+3. Fix clear speech-recognition errors using context from the question and the other options:
+   - Correct misspelled or phonetically garbled words when the intended word is clear from context.
+   - Do NOT change the factual meaning or invent facts absent from the transcript.
+4. Return valid JSON only — no markdown, no explanation.
 
 OUTPUT FORMAT:
 {"questions":[{"question":"...","A":"...","B":"...","C":"...","D":"..."}]}
