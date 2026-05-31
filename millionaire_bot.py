@@ -378,9 +378,6 @@ def play_speech_game(client, comp_id: int) -> dict:
             if not _is_valid_option(t) and i < len(real_opts):
                 opt_texts[i] = normalize_option(real_opts[i].text)
 
-        print(f"  [Server]       Q: {question.text}")
-        for i, opt in enumerate(real_opts):
-            print(f"    [{opt.id}] {opt.text}")
         print(f"  [Whisper+Qwen] Q: {q_text}")
         for i, t in enumerate(opt_texts):
             print(f"    [{real_opts[i].id}] {t}")
