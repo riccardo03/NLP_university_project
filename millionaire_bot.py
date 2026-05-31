@@ -185,7 +185,7 @@ def transcribe_audio(audio_path: str, prompt: str = "") -> str:
     segments, _ = _whisper_model.transcribe(
         audio_path,
         language="en",
-        beam_size=5,
+        beam_size=1,
         temperature=0.0,
         vad_filter=True,
         condition_on_previous_text=False,
@@ -287,7 +287,7 @@ def parse_mcq_with_qwen(raw_text: str):
         {"role": "system", "content": MCQ_PARSE_PROMPT},
         {"role": "user", "content": raw_text},
     ]
-    result = _pipe_call(messages, max_new_tokens=512)
+    result = _pipe_call(messages, max_new_tokens=150)
     return _extract_json(result)
 
 def transcribe_and_parse_mcq(audio_path: str):
@@ -351,24 +351,29 @@ def play_speech_game(client, comp_id: int) -> dict:
             except GameError:
                 opt_raws.append(real_opt.text)
 
-        # Use Qwen to clean and structure the raw Whisper transcriptions
-        try:
-            combined  = (
-                f"Question: {q_raw}\n"
-                + "\n".join(f"{chr(65+i)}) {t}" for i, t in enumerate(opt_raws))
-            )
-            parsed    = parse_mcq_with_qwen(combined)
-            mcq       = parsed["questions"][0]
-            q_text    = mcq.get("question") or q_raw
-            opt_texts = [
-                mcq.get(letter) or opt_raws[i]
-                for i, letter in enumerate("ABCD")
-                if i < len(opt_raws)
-            ]
-        except Exception as e:
-            print(f"  [Qwen MCQ] Parse failed: {e}. Using raw transcriptions.")
+        # Use Qwen to clean and structure the raw Whisper transcriptions.
+        # Skipped for News: TTS audio is clean and the step costs 3-5s per question.
+        if comp_id == COMP_NEWS:
             q_text    = q_raw
             opt_texts = list(opt_raws)
+        else:
+            try:
+                combined  = (
+                    f"Question: {q_raw}\n"
+                    + "\n".join(f"{chr(65+i)}) {t}" for i, t in enumerate(opt_raws))
+                )
+                parsed    = parse_mcq_with_qwen(combined)
+                mcq       = parsed["questions"][0]
+                q_text    = mcq.get("question") or q_raw
+                opt_texts = [
+                    mcq.get(letter) or opt_raws[i]
+                    for i, letter in enumerate("ABCD")
+                    if i < len(opt_raws)
+                ]
+            except Exception as e:
+                print(f"  [Qwen MCQ] Parse failed: {e}. Using raw transcriptions.")
+                q_text    = q_raw
+                opt_texts = list(opt_raws)
 
         # Normalization + validation gate — applied on BOTH paths so no raw
         # Whisper artifact ("Option B.", "Answer", stray labels) can reach the
