@@ -36,12 +36,12 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    512,
-    COMP_HISTORY_POLITICS: 512,
-    COMP_SCIENCE_NATURE:   512,
-    COMP_MATHS:            512,
-    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 512,
-    COMP_NEWS:             512,
+    COMP_ENTERTAINMENT:    100,
+    COMP_HISTORY_POLITICS: 100,
+    COMP_SCIENCE_NATURE:   100,
+    COMP_MATHS:            100,
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 100,
+    COMP_NEWS:             100,
 }
 
 _model         = None
@@ -50,20 +50,22 @@ _pipe          = None
 _whisper_model = None
 
 def _pipe_call(messages, max_new_tokens: int) -> str:
+    # enable_thinking=False disables Qwen3 chain-of-thought, giving fast direct
+    # answers. Older models ignore the kwarg, so it is always safe to pass.
+    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False, enable_thinking=False)
     try:
-        outputs = _pipe(messages, max_new_tokens=max_new_tokens, do_sample=False)
+        outputs = _pipe(messages, **gen_kwargs)
     except Exception as e:
         if "System role not supported" in str(e):
             system = next((m["content"] for m in messages if m["role"] == "system"), "")
             user   = next((m["content"] for m in messages if m["role"] == "user"), "")
             merged = [{"role": "user", "content": f"{system}\n\n{user}"}]
-            outputs = _pipe(merged, max_new_tokens=max_new_tokens, do_sample=False)
+            outputs = _pipe(merged, **gen_kwargs)
         else:
             raise
     result = outputs[0]["generated_text"]
     text = result.strip() if isinstance(result, str) else result[-1]["content"].strip()
-    # Qwen3 wraps reasoning in <think>...</think>; strip it so downstream
-    # parsers see only the final answer.
+    # Safety net: strip any residual <think> block in case the model ignores the flag.
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     return text
 
