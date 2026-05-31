@@ -1,67 +1,62 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #  PoliMillionaire — Python dependencies
-#  Runtime: Python 3.10–3.12 | GPU: CUDA 12.1 (Colab T4 / A100)
+#  Runtime: Python 3.10–3.12 | GPU: Colab T4 / A100 (CUDA 12.x)
 #
-#  ⚠ IMPORTANT — install torch BEFORE this file:
-#      pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
-#  Then:
+#  ⚠ DO NOT install torch manually.
+#  Google Colab ships the correct torch + torchvision + triton bundle for the
+#  available CUDA version.  Installing a different torch wheel (e.g. cu121 on
+#  a cu128 runtime) breaks torchvision and bitsandbytes CUDA kernels.
+#
+#  Just run:
 #      pip install -r requirements.txt
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 # ── Numeric foundation ───────────────────────────────────────────────────────
-# numpy 2.x is INCOMPATIBLE with faiss-cpu==1.8.0, datasets==2.20.0,
-# and bitsandbytes==0.48.1.  Keep strictly below 2.0.
+# numpy 2.x is INCOMPATIBLE with faiss-cpu==1.8.0 and datasets==2.20.0.
+# Keep strictly below 2.0.
 numpy>=1.24.0,<2.0.0
 
-# scipy is used inside the Maths RAG PAL sandbox (scipy.stats, scipy.optimize)
-scipy>=1.11.0,<1.14.0      # 1.14+ adds numpy-2 support but is not needed here
-
-
-# ── PyTorch (install with CUDA wheel — see header) ───────────────────────────
-torch>=2.4.1
-# triton is usually bundled with torch on Linux/Colab; listed explicitly
-# because the notebook pins it and it is required for Flash-Attention kernels
-triton>=2.1.0
+# scipy is used inside the Maths RAG PAL sandbox (scipy.stats)
+scipy>=1.11.0
 
 
 # ── Hugging Face stack ───────────────────────────────────────────────────────
-# transformers 4.47+ introduced a regression in Qwen2.5: post_init() calls
-# `if v not in ALL_PARALLEL_STYLES` where ALL_PARALLEL_STYLES is None, raising
-# `TypeError: argument of type 'NoneType' is not iterable`.
-# Pin exactly to 4.46.0 which is the last confirmed-working version.
+# transformers 4.47+ introduced a regression on Qwen2.5: post_init() raises
+#   TypeError: argument of type 'NoneType' is not iterable
+# because ALL_PARALLEL_STYLES is None in that version.
+# 4.46.0 is the last confirmed-working release; it is compatible with any
+# torch>=2.0 so it works on both cu121 and cu128 runtimes.
 transformers==4.46.0
 
-# accelerate provides the device_map="auto" dispatcher used in load_model().
-# 0.34+ changed some internal dispatch APIs; 0.33.0 is the verified-working version.
-accelerate==0.33.0
+# accelerate provides the device_map="auto" dispatcher.
+# 0.33.0 was tested; newer versions are also compatible with transformers 4.46.
+accelerate>=0.33.0
 
-# huggingface_hub is a transitive dep of transformers; a recent version is fine
+# huggingface_hub is a transitive dep of transformers
 huggingface_hub>=0.24.0
 
-# peft is not actively used at runtime but must be present because bitsandbytes
-# registers PEFT hooks during model loading when it detects the package
-peft==0.13.2
+# peft must be present: bitsandbytes registers PEFT hooks at model-load time
+peft>=0.13.2
 
 
 # ── Quantization ─────────────────────────────────────────────────────────────
-# bitsandbytes 0.49+ renames and reorganises BitsAndBytesConfig internals.
-# 0.48.1 is the last version where load_in_4bit + bnb_4bit_quant_type="nf4"
-# works correctly with transformers==4.46.0 and accelerate==0.33.0.
-bitsandbytes==0.48.1
+# bitsandbytes auto-detects the installed CUDA version and loads the matching
+# kernel backend, so it works on both CUDA 12.1 and 12.8 without changes.
+# The BitsAndBytesConfig API (load_in_4bit, bnb_4bit_quant_type, etc.) has
+# been stable since 0.39; 0.41+ is the minimum for reliable 4-bit NF4 support.
+bitsandbytes>=0.41.0
 
 
 # ── Science RAG ──────────────────────────────────────────────────────────────
-# sentence-transformers: used for BAAI/bge-small-en-v1.5 embeddings.
-# 3.x is also compatible but 2.7.x is the last version that does not require
-# any additional torch extras.
+# sentence-transformers: embedding model BAAI/bge-small-en-v1.5
 sentence-transformers>=2.7.0,<4.0.0
 
-# faiss-cpu: 1.9+ builds on PyPI require numpy>=2 on several platforms.
+# faiss-cpu 1.9+ requires numpy>=2 on several platform builds.
 # Pin to 1.8.0 which is fully compatible with numpy 1.x.
 faiss-cpu==1.8.0
 
-# datasets: 3.x dropped support for numpy<2.  Pin to the last 2.x release.
+# datasets 3.x dropped support for numpy<2.  Pin to the last 2.x release.
 datasets==2.20.0
 
 # BM25 hybrid reranker used in rag_science.py
@@ -69,39 +64,29 @@ rank_bm25==0.2.2
 
 
 # ── NER model (Entertainment · News · Philosophy RAG) ────────────────────────
-# GLiNER is used for named-entity extraction in rag_entertainment.py and
-# re-used (via import) by rag_news.py and rag_philosophy_psychology.py.
-# The API (GLiNER.from_pretrained + model.predict_entities) is stable across 0.2.x.
+# GLiNER API (GLiNER.from_pretrained + predict_entities) is stable in 0.2.x
 gliner>=0.2.0,<0.3.0
 
 
 # ── Web search ───────────────────────────────────────────────────────────────
-# duckduckgo-search 6.x renamed its Python module from `duckduckgo_search`
-# to `ddgs`.  All RAG modules do `from ddgs import DDGS`, which requires 6.x.
-# 7.x changed the search() API (removed `text` kwarg defaults); pin to 6.2.6.
+# duckduckgo-search 6.x renamed its Python module to `ddgs`.
+# All RAG modules do `from ddgs import DDGS`, which requires 6.x.
+# 7.x changed the search() text API; pin to 6.2.6 for stability.
 duckduckgo-search==6.2.6
 
 
 # ── Maths RAG ────────────────────────────────────────────────────────────────
-# sympy: symbolic algebra, equation solving, and isprime() used throughout
-# rag_math.py.  1.12+ is required for Python 3.12 compatibility.
+# sympy 1.12+ is required for Python 3.12 compatibility
 sympy>=1.12
 
 
 # ── Wikipedia RAG (History · Maths fallback) ─────────────────────────────────
-# The `wikipedia` package (NOT `wikipedia-api`).  1.4.0 is the last release;
-# it is stable and there is no newer version to worry about.
 wikipedia==1.4.0
 
 
 # ── Speech mode ──────────────────────────────────────────────────────────────
-# openai-whisper: Whisper `small` ASR used in play_speech_game().
-# The 20231117 release introduced fp16=False support on CPU; any version
-# at or after this release works.
 openai-whisper>=20231117
 
 
 # ── HTTP fetching (News · Philosophy RAG) ────────────────────────────────────
-# requests is used directly by rag_entertainment.py, rag_news.py, and
-# rag_philosophy_psychology.py to fetch article HTML.
 requests>=2.31.0

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tempfile
@@ -81,7 +82,6 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
         quantization_config=quantization_config,
         trust_remote_code=True,
     )
-    #_model.config.max_length = None
     _model.generation_config = GenerationConfig(
         pad_token_id=_tokenizer.pad_token_id or _tokenizer.eos_token_id,
         eos_token_id=_tokenizer.eos_token_id,
@@ -105,54 +105,106 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: entertainment RAG setup failed: {e}")
 
-    """try:
-        import rag_math as _rag_mth
-        _rag_mth.setup_maths_rag(llm_callback=_pipe_call)
-    except Exception as e:
-        print(f"Warning: maths RAG setup failed: {e}")"""
 
 
-def load_speech_model(model_name: str = "small") -> None:
-    """Load an OpenAI Whisper ASR model for speech-mode transcription.
-
-    The loaded model is stored in the module-level _whisper_model and used
-    by transcribe_bytes().  Requires the openai-whisper package.
-    """
+def load_speech_model(model_name: str = "large-v3") -> None:
     global _whisper_model
-    try:
-        import whisper as _whisper_lib
-    except ImportError:
-        raise ImportError("Run:  %pip install -q openai-whisper")
-    print(f"Loading Whisper '{model_name}' model...")
-    _whisper_model = _whisper_lib.load_model(model_name)
+
+    from faster_whisper import WhisperModel
+
+    print(f"Loading faster-whisper '{model_name}'...")
+
+    _whisper_model = WhisperModel(
+        model_name,
+        device="cuda",
+        compute_type="int8"  # <-- THIS is your "quantization"
+    )
+
     print("Whisper ready.")
+
+MCQ_PROMPT = """
+You are transcribing a multiple choice exam.
+
+STRICT FORMAT RULES:
+- Keep each question on a new line
+- Keep answer choices exactly as spoken
+- Each option must start with A), B), C), or D)
+- Do NOT merge options into sentences
+- Do NOT paraphrase or reword anything
+- Preserve punctuation exactly
+"""
+
+MCQ_PARSE_PROMPT = """
+You are an expert exam parser.
+
+Your task:
+Convert the following transcript into structured MCQ JSON.
+
+RULES:
+- Do NOT invent words
+- Do NOT summarize
+- Only reorganize the text
+- Keep exact wording from transcript
+
+OUTPUT FORMAT (strict JSON):
+{
+  "questions": [
+    {
+      "question": "...",
+      "A": "...",
+      "B": "...",
+      "C": "...",
+      "D": "..."
+    }
+  ]
+}
+
+If something is missing, keep it as empty string "".
+"""
+
+
+def transcribe_audio(audio_path: str, prompt: str = "") -> str:
+    global _whisper_model
+
+    segments, _ = _whisper_model.transcribe(
+        audio_path,
+        language="en",
+        beam_size=5,
+        best_of=5,
+        temperature=0.0,
+        vad_filter=True,
+        condition_on_previous_text=True,
+        initial_prompt=prompt or MCQ_PROMPT,
+    )
+
+    return "\n".join(seg.text.strip() for seg in segments)
 
 
 def transcribe_bytes(audio_bytes: bytes, prompt: str = "") -> str:
-    """Write WAV bytes to a temp file, run Whisper, and return the transcript."""
-    if _whisper_model is None:
-        raise RuntimeError("Call load_speech_model() before transcribing.")
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes)
-        tmp = f.name
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
     try:
-        result = _whisper_model.transcribe(tmp, language="en", fp16=False, initial_prompt=prompt)
-        return result["text"].strip()
+        return transcribe_audio(tmp_path, prompt=prompt)
     finally:
-        os.unlink(tmp)
+        os.unlink(tmp_path)
 
 
-def extract_option_content(transcribed: str) -> str:
-    """Strip the option-label prefix from a Whisper-transcribed option string.
-    Examples:
-        'Option A, bread'            -> 'bread'
-        'Option B. The Sun.'         -> 'The Sun.'
-        'Topsy and D, it is the sun' -> 'it is the sun'
-    """
-    match = re.search(r'[,\.]\s*(.+)', transcribed)
-    if match:
-        return match.group(1).strip()
-    return transcribed.strip()
+def parse_mcq_with_qwen(raw_text: str):
+    messages = [
+        {"role": "system", "content": MCQ_PARSE_PROMPT},
+        {"role": "user", "content": raw_text},
+    ]
+    result = _pipe_call(messages, max_new_tokens=512)
+    # Strip markdown code fences the model may add
+    result = re.sub(r"^```(?:json)?\s*", "", result.strip())
+    result = re.sub(r"\s*```$", "", result.strip())
+    return json.loads(result)
+
+def transcribe_and_parse_mcq(audio_path: str):
+    raw_text = transcribe_audio(audio_path)
+    return parse_mcq_with_qwen(raw_text)
+
 
 
 def play_speech_game(client, comp_id: int) -> dict:
@@ -195,26 +247,43 @@ def play_speech_game(client, comp_id: int) -> dict:
         # Transcribe question audio; fall back to server text on failure
         try:
             q_audio = game.fetch_audio_question()
-            q_text  = transcribe_bytes(q_audio, prompt="Science question")
-            print(f"  [Whisper] Q: {q_text}")
+            q_raw   = transcribe_bytes(q_audio)
         except Exception as e:
             print(f"  [Whisper] Q audio failed: {e}. Using server text.")
-            q_text = question.text
+            q_raw = question.text
 
-        # Transcribe each option audio sequentially (A → B → C → D).
-        # The 30-second timer starts only after the last fetch completes.
+        # Transcribe each option audio sequentially (A → B → C → D)
         real_opts = question.options
-        opt_texts = []
+        opt_raws  = []
         for real_opt in real_opts:
             try:
                 opt_audio = game.fetch_audio_option_next()
-                raw       = transcribe_bytes(opt_audio, prompt="Answer option, one short phrase:")
-                cleaned   = extract_option_content(raw)
-                opt_texts.append(cleaned)
-                print(f"    [{real_opt.id}] '{raw}' -> '{cleaned}'")
+                opt_raws.append(transcribe_bytes(opt_audio))
             except GameError:
-                # No audio available for this option; use the text field
-                opt_texts.append(real_opt.text)
+                opt_raws.append(real_opt.text)
+
+        # Use Qwen to clean and structure the raw Whisper transcriptions
+        try:
+            combined  = (
+                f"Question: {q_raw}\n"
+                + "\n".join(f"{chr(65+i)}) {t}" for i, t in enumerate(opt_raws))
+            )
+            parsed    = parse_mcq_with_qwen(combined)
+            mcq       = parsed["questions"][0]
+            q_text    = mcq.get("question") or q_raw
+            opt_texts = [
+                mcq.get(letter) or opt_raws[i]
+                for i, letter in enumerate("ABCD")
+                if i < len(opt_raws)
+            ]
+        except Exception as e:
+            print(f"  [Qwen MCQ] Parse failed: {e}. Using raw transcriptions.")
+            q_text    = q_raw
+            opt_texts = opt_raws
+
+        print(f"  [Whisper+Qwen] Q: {q_text}")
+        for i, t in enumerate(opt_texts):
+            print(f"    [{real_opts[i].id}] {t}")
 
         # Build lightweight option objects with real server IDs + transcribed texts
         class _SpeechOpt:
@@ -276,35 +345,14 @@ def play_speech_game(client, comp_id: int) -> dict:
     return log
 
 
-def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40, **kwargs) -> str:
+def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 40) -> str:
     if _pipe is None:
         raise RuntimeError("You must call load_model() first.")
-
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    try:
-        outputs = _pipe(
-            messages,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
-    except Exception as e:
-        if "System role not supported" in str(e):
-            merged = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
-            outputs = _pipe(
-                merged,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-            )
-        else:
-            raise
-
-    result = outputs[0]["generated_text"]
-    if isinstance(result, str):
-        return result.strip()
-    return result[-1]["content"].strip()
+    return _pipe_call(messages, max_new_tokens)
 
 
 SYSTEM_PROMPTS = {
