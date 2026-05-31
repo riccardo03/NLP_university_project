@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #  PoliMillionaire — Python dependencies
-#  Runtime: Python 3.10–3.12 | GPU: Colab T4 / A100 (CUDA 12.x)
+#  Runtime: Python 3.10–3.12 | Model: Qwen3-14B (4-bit NF4 quantized)
 #
 #  Just run:
 #      pip install -r requirements.txt
@@ -17,15 +17,11 @@ scipy>=1.11.0
 
 
 # ── Hugging Face stack ───────────────────────────────────────────────────────
-# transformers 4.47+ introduced a regression on Qwen2.5: post_init() raises
-#   TypeError: argument of type 'NoneType' is not iterable
-# because ALL_PARALLEL_STYLES is None in that version.
-# 4.46.0 is the last confirmed-working release; it is compatible with any
-# torch>=2.0 so it works on both cu121 and cu128 runtimes.
+# transformers 4.51+ added full Qwen3 support (including rope_scaling and
+# the updated attention implementation). 4.54.0 is the tested release.
 transformers==4.54.0
 
 # accelerate provides the device_map="auto" dispatcher.
-# 0.33.0 was tested; newer versions are also compatible with transformers 4.46.
 accelerate>=0.33.0
 
 # huggingface_hub is a transitive dep of transformers
@@ -37,9 +33,8 @@ peft>=0.13.2
 
 # ── Quantization ─────────────────────────────────────────────────────────────
 # bitsandbytes auto-detects the installed CUDA version and loads the matching
-# kernel backend, so it works on both CUDA 12.1 and 12.8 without changes.
-# The BitsAndBytesConfig API (load_in_4bit, bnb_4bit_quant_type, etc.) has
-# been stable since 0.39; 0.41+ is the minimum for reliable 4-bit NF4 support.
+# kernel backend. 0.41+ is the minimum for reliable 4-bit NF4 support used
+# to run Qwen3-14B on a single GPU.
 bitsandbytes>=0.41.0
 
 
@@ -64,10 +59,10 @@ gliner>=0.2.0,<0.3.0
 
 
 # ── Web search ───────────────────────────────────────────────────────────────
-# duckduckgo-search 6.x renamed its Python module to `ddgs`.
-# All RAG modules do `from ddgs import DDGS`, which requires 6.x.
-# 7.x changed the search() text API; pin to 6.2.6 for stability.
-ddgs==6.2.6
+# The PyPI package is `ddgs` (starts at v9.0.0).
+# The old package `duckduckgo-search` topped out at v6.x — do NOT pin to 6.x.
+# All RAG modules do `from ddgs import DDGS`.
+ddgs>=9.0.0
 
 
 # ── Maths RAG ────────────────────────────────────────────────────────────────
