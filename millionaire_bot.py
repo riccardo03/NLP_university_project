@@ -36,12 +36,12 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    40,
-    COMP_HISTORY_POLITICS: 40,
-    COMP_SCIENCE_NATURE:   40,
-    COMP_MATHS:            40,
-    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 40,
-    COMP_NEWS:             40,
+    COMP_ENTERTAINMENT:    512,
+    COMP_HISTORY_POLITICS: 512,
+    COMP_SCIENCE_NATURE:   512,
+    COMP_MATHS:            512,
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 512,
+    COMP_NEWS:             512,
 }
 
 _model         = None
@@ -61,7 +61,11 @@ def _pipe_call(messages, max_new_tokens: int) -> str:
         else:
             raise
     result = outputs[0]["generated_text"]
-    return result.strip() if isinstance(result, str) else result[-1]["content"].strip()
+    text = result.strip() if isinstance(result, str) else result[-1]["content"].strip()
+    # Qwen3 wraps reasoning in <think>...</think>; strip it so downstream
+    # parsers see only the final answer.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return text
 
 
 
