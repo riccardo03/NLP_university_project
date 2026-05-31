@@ -127,54 +127,22 @@ def load_speech_model(model_name: str = "large-v3") -> None:
 
     print("Whisper ready.")
 
-MCQ_PROMPT = """
-You are transcribing a multiple choice quiz.
+MCQ_PROMPT = "Multiple choice quiz. Question followed by four answer choices."
 
-STRICT FORMAT RULES:
-- Keep each question on a new line.
-- Keep answer choices separate whenever they are spoken separately.
-- Do not add labels such as A), B), C), D), Option A, Option B, etc.
-- Do not merge answer choices into a sentence.
-- Do not paraphrase or reword anything.
-- Preserve punctuation, numbers, names, and dates as accurately as possible.
-"""
+MCQ_PARSE_PROMPT = """You are an expert quiz parser.
 
-MCQ_PARSE_PROMPT = """
-You are an expert quiz parser and transcript normalizer.
-
-TASKS:
-1. Extract the question and answer choices.
-2. Correct obvious speech-recognition or transcription errors when the intended text is reasonably clear from context.
-3. Normalize spelling, capitalization, punctuation, and formatting.
-4. Normalize dates to ISO 8601 format whenever possible:
-   - YYYY-MM-DD for complete dates
-   - YYYY-MM for year/month only
-   - YYYY for year only
-5. Preserve the meaning of the original transcript.
-6. Do not invent information that is not supported by the transcript.
-7. If multiple interpretations are plausible, keep the original wording.
-8. Use context from the question and answer choices to resolve obvious transcription mistakes when confidence is high.
-
-OUTPUT FORMAT (strict JSON):
-
-{
-  "questions": [
-    {
-      "question": "...",
-      "A": "...",
-      "B": "...",
-      "C": "...",
-      "D": "..."
-    }
-  ]
-}
+Convert the transcript below into structured JSON.
 
 RULES:
-- Return valid JSON only.
-- No explanations.
-- No markdown.
-- No additional fields.
-- If an option is missing, use "".
+- Strip any option-label prefix from answer values: remove patterns like "Option A,", "Option B.", "A)", "(A)", "A." before the actual answer text.
+- Extract only the core question text (no trailing artifacts).
+- Do NOT invent words. Do NOT summarize. Only reorganize.
+- Return valid JSON only — no markdown fences, no explanations.
+
+OUTPUT FORMAT:
+{"questions":[{"question":"...","A":"...","B":"...","C":"...","D":"..."}]}
+
+If an option is missing use "".
 """
 
 
@@ -185,10 +153,9 @@ def transcribe_audio(audio_path: str, prompt: str = "") -> str:
         audio_path,
         language="en",
         beam_size=5,
-        best_of=5,
         temperature=0.0,
         vad_filter=True,
-        condition_on_previous_text=True,
+        condition_on_previous_text=False,
         initial_prompt=prompt or MCQ_PROMPT,
     )
 
