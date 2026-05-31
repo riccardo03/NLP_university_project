@@ -36,12 +36,12 @@ COMP_NAMES = {
 }
 
 _MAX_TOKENS = {
-    COMP_ENTERTAINMENT:    100,
-    COMP_HISTORY_POLITICS: 100,
-    COMP_SCIENCE_NATURE:   100,
-    COMP_MATHS:            100,
-    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 100,
-    COMP_NEWS:             100,
+    COMP_ENTERTAINMENT:    60,
+    COMP_HISTORY_POLITICS: 60,
+    COMP_SCIENCE_NATURE:   60,
+    COMP_MATHS:            60,
+    COMP_PHILOSOPHY_AND_PSYCHOLOGY: 60,
+    COMP_NEWS:             60,
 }
 
 _model         = None
@@ -50,24 +50,46 @@ _pipe          = None
 _whisper_model = None
 
 def _pipe_call(messages, max_new_tokens: int) -> str:
-    # enable_thinking=False disables Qwen3 chain-of-thought, giving fast direct
-    # answers. Older models ignore the kwarg, so it is always safe to pass.
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False, enable_thinking=False)
+    def _generate(msgs):
+        # apply_chat_template with enable_thinking=False disables Qwen3 CoT at
+        # the tokenizer level — the model never enters think mode so no tokens
+        # are wasted on reasoning. Falls back silently for models that don't
+        # support the flag (e.g. Qwen2.5).
+        try:
+            input_ids = _tokenizer.apply_chat_template(
+                msgs,
+                enable_thinking=False,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            ).to(_model.device)
+        except TypeError:
+            input_ids = _tokenizer.apply_chat_template(
+                msgs,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            ).to(_model.device)
+
+        with torch.no_grad():
+            output_ids = _model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+        new_tokens = output_ids[0][input_ids.shape[-1]:]
+        text = _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        # Safety net in case the model still emits a think block.
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
     try:
-        outputs = _pipe(messages, **gen_kwargs)
+        return _generate(messages)
     except Exception as e:
         if "System role not supported" in str(e):
             system = next((m["content"] for m in messages if m["role"] == "system"), "")
             user   = next((m["content"] for m in messages if m["role"] == "user"), "")
             merged = [{"role": "user", "content": f"{system}\n\n{user}"}]
-            outputs = _pipe(merged, **gen_kwargs)
-        else:
-            raise
-    result = outputs[0]["generated_text"]
-    text = result.strip() if isinstance(result, str) else result[-1]["content"].strip()
-    # Safety net: strip any residual <think> block in case the model ignores the flag.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return text
+            return _generate(merged)
+        raise
 
 
 
