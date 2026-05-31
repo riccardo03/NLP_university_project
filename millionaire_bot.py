@@ -105,7 +105,12 @@ def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     except Exception as e:
         print(f"Warning: entertainment RAG setup failed: {e}")
 
+def clean_option_text(text: str) -> str:
+    # remove "option A/B/C/D", "A)", "B.", etc.
+    text = re.sub(r"(?i)\boption\s*[a-d]\b[:\.\)]?", "", text)
+    text = re.sub(r"^[A-Da-d][\)\.\-:]\\s*", "", text)
 
+    return text.strip()
 
 def load_speech_model(model_name: str = "large-v3") -> None:
     global _whisper_model
@@ -123,30 +128,35 @@ def load_speech_model(model_name: str = "large-v3") -> None:
     print("Whisper ready.")
 
 MCQ_PROMPT = """
-You are transcribing a multiple choice exam.
+You are transcribing a multiple choice quiz.
 
 STRICT FORMAT RULES:
-- Keep each question on a new line
-- Keep answer choices exactly as spoken
-- Each option must start with A), B), C), or D)
-- Do NOT merge options into sentences
-- Do NOT paraphrase or reword anything
-- Preserve punctuation exactly
+- Keep each question on a new line.
+- Keep answer choices separate whenever they are spoken separately.
+- Do not add labels such as A), B), C), D), Option A, Option B, etc.
+- Do not merge answer choices into a sentence.
+- Do not paraphrase or reword anything.
+- Preserve punctuation, numbers, names, and dates as accurately as possible.
 """
 
 MCQ_PARSE_PROMPT = """
-You are an expert exam parser.
+You are an expert quiz parser and transcript normalizer.
 
-Your task:
-Convert the following transcript into structured MCQ JSON.
-
-RULES:
-- Do NOT invent words
-- Do NOT summarize
-- Only reorganize the text
-- Keep exact wording from transcript
+TASKS:
+1. Extract the question and answer choices.
+2. Correct obvious speech-recognition or transcription errors when the intended text is reasonably clear from context.
+3. Normalize spelling, capitalization, punctuation, and formatting.
+4. Normalize dates to ISO 8601 format whenever possible:
+   - YYYY-MM-DD for complete dates
+   - YYYY-MM for year/month only
+   - YYYY for year only
+5. Preserve the meaning of the original transcript.
+6. Do not invent information that is not supported by the transcript.
+7. If multiple interpretations are plausible, keep the original wording.
+8. Use context from the question and answer choices to resolve obvious transcription mistakes when confidence is high.
 
 OUTPUT FORMAT (strict JSON):
+
 {
   "questions": [
     {
@@ -159,7 +169,12 @@ OUTPUT FORMAT (strict JSON):
   ]
 }
 
-If something is missing, keep it as empty string "".
+RULES:
+- Return valid JSON only.
+- No explanations.
+- No markdown.
+- No additional fields.
+- If an option is missing, use "".
 """
 
 
