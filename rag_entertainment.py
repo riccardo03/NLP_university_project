@@ -156,7 +156,9 @@ def _extract_subjects_gliner(question: str) -> list[tuple[str, str]]:
     if model is None:
         return []
     try:
-        entities = model.predict_entities(question, _GLINER_LABELS, threshold=0.5)
+        import torch
+        with torch.no_grad():
+            entities = model.predict_entities(question, _GLINER_LABELS, threshold=0.5)
         entities.sort(key=lambda e: (_GLINER_LABEL_PRIORITY.get(e["label"], 99), e["start"]))
         seen: set[str] = set()
         result: list[tuple[str, str]] = []
@@ -313,7 +315,8 @@ def _fetch_article(url: str) -> str:
         return ""
 
 
-def _search_and_fetch(query: str, q_keywords: set[str]) -> tuple[str, str]:
+def _search_and_fetch(query: str, q_keywords: set[str]) -> list[tuple[str, str]]:
+    results = []
     for url in _ddg_search(query):
         if any(domain in url for domain in _SKIP_DOMAINS):
             print(f"  [Entertainment] skipping: {url[:80]}")
@@ -323,8 +326,8 @@ def _search_and_fetch(query: str, q_keywords: set[str]) -> tuple[str, str]:
             continue
         text = _fetch_article(url)
         if text and len(text) >= _MIN_ARTICLE_CHARS and any(kw in text.lower() for kw in q_keywords):
-            return text, url
-    return "", ""
+            results.append((text, url))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -391,13 +394,13 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
         candidates: list[tuple[int, str, str]] = []
         for fut in concurrent.futures.as_completed(fetch_futs):
             try:
-                text, url = fut.result(timeout=_TIMEOUT + 2)
+                results = fut.result(timeout=_TIMEOUT + 2)
             except Exception:
                 continue
-            if text:
+            for text, url in results:
                 score = (
-                    sum(2 for kw in option_kw   if kw in text.lower()) +
-                    sum(1 for kw in q_keywords   if kw in text.lower())
+                    sum(2 for kw in option_kw  if kw in text.lower()) +
+                    sum(1 for kw in q_keywords if kw in text.lower())
                 )
                 candidates.append((score, text, url))
                 print(f"  [Entertainment] candidate (score={score}, {len(text)} chars): {url[:80]}")
