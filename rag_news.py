@@ -13,7 +13,7 @@ import re
 import requests
 
 _TIMEOUT                  = 4
-_ARTICLE_MAX_CHARS        = 10000
+_ARTICLE_MAX_CHARS        = 7000
 _MIN_ARTICLE_CHARS        = 500
 _MAX_DDG_RESULTS          = 3
 

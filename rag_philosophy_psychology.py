@@ -12,7 +12,7 @@ import re
 import requests
 
 _TIMEOUT           = 4
-_ARTICLE_MAX_CHARS = 10000
+_ARTICLE_MAX_CHARS = 7000
 _MAX_DDG_RESULTS   = 3
 
 _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY: frozenset[str] = frozenset({

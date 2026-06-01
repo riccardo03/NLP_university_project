@@ -464,6 +464,7 @@ SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
         "You are a entertainment analyst answering multiple-choice questions about entertainment facts. "
         "An article is provided as the sole source of truth — read it carefully before answering. "
+        "if u are 100\% sure of the answer, answer it, otherwise"
         "ALWAYS prioritize the article over your own knowledge. "
         "CRITICAL: reply with the INDEX of the correct option (0, 1, 2, or 3), "
         "NOT the value of the answer itself. For example, if the answer is '3' "

@@ -11,7 +11,7 @@ import requests
 
 _WIKI_UA           = "QuizBot/1.0 (research)"
 _TIMEOUT           = 4
-_ARTICLE_MAX_CHARS = 10000
+_ARTICLE_MAX_CHARS = 7000
 _MIN_ARTICLE_CHARS = 300
 _MAX_DDG_RESULTS   = 6
 
