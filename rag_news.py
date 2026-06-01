@@ -68,10 +68,12 @@ _P_TAG_RE = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
 
 def _extract_subjects_news(text: str) -> list[str]:
     try:
+        import torch
         from rag_entertainment import _gliner_model
         if _gliner_model is None:
             return []
-        entities = _gliner_model.predict_entities(text, _GLINER_LABELS_NEWS, threshold=0.4)
+        with torch.no_grad():
+            entities = _gliner_model.predict_entities(text, _GLINER_LABELS_NEWS, threshold=0.4)
         seen: set[str] = set()
         result: list[str] = []
         for ent in entities:

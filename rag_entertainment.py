@@ -13,7 +13,7 @@ _WIKI_UA           = "QuizBot/1.0 (research)"
 _TIMEOUT           = 4
 _ARTICLE_MAX_CHARS = 10000
 _MIN_ARTICLE_CHARS = 300
-_MAX_DDG_RESULTS   = 3
+_MAX_DDG_RESULTS   = 6
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "youtube.com",
@@ -65,6 +65,7 @@ _PERSON_LABELS = frozenset({"person", "actor", "musician", "director", "band", "
 _QUOTED_RE        = re.compile(r"""['\"''“”]([\w][\w\s,.\-&!]{1,58}?)['\"''“”]""")
 _PROPER_MULTI_RE  = re.compile(r'\b[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+(?:\s+[A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)+\b')
 _PROPER_SINGLE_RE = re.compile(r'^[A-ZÀ-Ý][a-zA-ZÀ-ÿ]{2,}$')
+_YEAR_RE          = re.compile(r'\b(?:19|20)\d{2}s?\b')
 _TOKEN_RE         = re.compile(r"[a-zA-ZÀ-ÿ0-9$!&]+")
 _CITE_RE          = re.compile(r"\[\d+\]")
 _SECTION_HEADER   = re.compile(r"^=+\s*[^=]+\s*=+$")
@@ -92,7 +93,10 @@ def _get_gliner_model():
     _gliner_model_tried = True
     try:
         from gliner import GLiNER
+        import torch
         _gliner_model = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
+        _gliner_model.eval()
+        torch.set_grad_enabled(False)
     except Exception as e:
         print(f"  [RAG] GLiNER model unavailable: {e}")
     return _gliner_model
@@ -315,9 +319,11 @@ def _fetch_article(url: str) -> str:
         return ""
 
 
-def _search_and_fetch(query: str, q_keywords: set[str]) -> list[tuple[str, str]]:
+def _search_and_fetch(query: str, q_keywords: set[str], target: int = 3) -> list[tuple[str, str]]:
     results = []
     for url in _ddg_search(query):
+        if len(results) >= target:
+            break
         if any(domain in url for domain in _SKIP_DOMAINS):
             print(f"  [Entertainment] skipping: {url[:80]}")
             continue
@@ -366,14 +372,20 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
         if len(t) >= 3 and t not in _STOP_WORDS
     }
 
+    # --- extract dates from query ---
+    dates = _YEAR_RE.findall(query)
+    date_str = " ".join(dict.fromkeys(dates))
+    if date_str:
+        print(f"  [Entertainment] dates: {date_str!r}")
+
     # --- build queries ---
     subject_tokens  = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _tokenize(query)
         if len(t) >= 5 and t not in _STOP_WORDS and t not in subject_tokens
     ]
-    q1 = main_term
-    q2 = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
+    q1 = " ".join(filter(None, [main_term, date_str]))
+    q2 = " ".join(filter(None, [main_term, " ".join(q_content_words[:3]), date_str]))
 
     queries = list(dict.fromkeys(q for q in [q1, q2] if q.strip()))
     print(f"  [Entertainment] queries: {queries}")
