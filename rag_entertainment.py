@@ -404,12 +404,17 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
             pass
 
         candidates: list[tuple[int, str, str]] = []
+        seen_candidate_urls: set[str] = set()
         for fut in concurrent.futures.as_completed(fetch_futs):
             try:
                 results = fut.result(timeout=_TIMEOUT + 2)
             except Exception:
                 continue
             for text, url in results:
+                if url in seen_candidate_urls:
+                    print(f"  [Entertainment] duplicate skipped: {url[:80]}")
+                    continue
+                seen_candidate_urls.add(url)
                 score = (
                     sum(2 for kw in option_kw  if kw in text.lower()) +
                     sum(1 for kw in q_keywords if kw in text.lower())
@@ -423,7 +428,8 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
     article_text = ""
     article_url  = ""
     if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        # tiebreak: same score → prefer non-Wikipedia (Wikipedia already in wiki_text)
+        candidates.sort(key=lambda x: (x[0], "wikipedia.org" not in x[2]), reverse=True)
         _, article_text, article_url = candidates[0]
         print(f"  [Entertainment] selected article: {article_url[:80]}")
     else:
