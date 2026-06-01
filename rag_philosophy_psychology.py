@@ -13,7 +13,7 @@ import requests
 
 _TIMEOUT           = 4
 _ARTICLE_MAX_CHARS = 10000
-_MAX_DDG_RESULTS   = 2
+_MAX_DDG_RESULTS   = 3
 
 _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY: frozenset[str] = frozenset({
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
@@ -141,15 +141,6 @@ def rag_philosophy_psychology(query: str, option_texts: list[str] | None = None)
             t for t in tokens if len(t) >= 4 and t not in _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY
         )[:60]
 
-    n_opts      = min(len(option_texts), 3) if option_texts else 0
-
-    def _clean_option(opt: str) -> str:
-        words = [
-            t for t in _TOKEN_RE.findall(opt.lower())
-            if len(t) >= 3 and t not in _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY
-        ]
-        return " ".join(words[:6])
-
     subject_tokens = {s.lower() for s in subjects}
     q_content_words = [
         t for t in _TOKEN_RE.findall(query.lower())
@@ -157,20 +148,10 @@ def rag_philosophy_psychology(query: str, option_texts: list[str] | None = None)
         and t not in _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY
         and t not in subject_tokens
     ]
-    synth_query = " ".join(filter(None, [
-        main_term,
-        " ".join(q_content_words[:3]),
-    ]))
+    q1 = main_term
+    q2 = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
 
-    if n_opts:
-        option_queries = [
-            " ".join(filter(None, [main_term, _clean_option(option_texts[i])]))
-            for i in range(n_opts)
-        ]
-    else:
-        option_queries = [main_term]
-
-    queries = [synth_query] + option_queries if synth_query.strip() else option_queries
+    queries = list(dict.fromkeys(q for q in [q1, q2] if q.strip()))
     print(f"  [Philosophy_Psychology] queries: {queries}")
 
     q_keywords = {

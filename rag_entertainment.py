@@ -8,13 +8,12 @@ import concurrent.futures
 import urllib.parse
 import html as _html_module
 import requests
-from functools import lru_cache
 
 _WIKI_UA           = "QuizBot/1.0 (research)"
 _TIMEOUT           = 4
 _ARTICLE_MAX_CHARS = 10000
 _MIN_ARTICLE_CHARS = 300
-_MAX_DDG_RESULTS   = 2
+_MAX_DDG_RESULTS   = 3
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "youtube.com",
@@ -124,10 +123,6 @@ def _keywords(text: str) -> set[str]:
     return {t for t in _tokenize(text) if len(t) >= 3 and t not in _STOP_WORDS}
 
 
-def _clean_query_text(text: str) -> str:
-    kept = [w for w in text.split() if w.lower().rstrip(".,!?:;'\"") not in _STOP_WORDS]
-    return " ".join(kept) if kept else text
-
 
 def _extract_subjects_regex(question: str) -> list[str]:
     """Quoted titles first, then multi-word proper nouns, then single proper nouns."""
@@ -220,7 +215,6 @@ def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
 # Wikipedia (cached — entertainment facts are stable)
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=64)
 def _wiki_lookup(query: str) -> str:
     try:
         search_url = (
@@ -375,15 +369,10 @@ def rag_entertainment(query: str, option_texts: list = None) -> str:
         t for t in _tokenize(query)
         if len(t) >= 5 and t not in _STOP_WORDS and t not in subject_tokens
     ]
-    synth_query = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
+    q1 = main_term
+    q2 = " ".join(filter(None, [main_term, " ".join(q_content_words[:3])]))
 
-    n_opts = min(len(option_texts), 3) if option_texts else 0
-    option_queries = [
-        " ".join(filter(None, [main_term, _clean_query_text(option_texts[i])[:50]]))
-        for i in range(n_opts)
-    ]
-
-    queries = list(dict.fromkeys(q for q in [synth_query] + option_queries if q.strip()))
+    queries = list(dict.fromkeys(q for q in [q1, q2] if q.strip()))
     print(f"  [Entertainment] queries: {queries}")
 
     # --- parallel: Wikipedia + DDG article fetch ---

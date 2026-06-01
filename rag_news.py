@@ -15,7 +15,7 @@ import requests
 _TIMEOUT                  = 4
 _ARTICLE_MAX_CHARS        = 10000
 _MIN_ARTICLE_CHARS        = 500
-_MAX_DDG_RESULTS          = 2
+_MAX_DDG_RESULTS          = 3
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "youtube.com",
@@ -211,16 +211,8 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     # --- queries ---
     q1 = " ".join(filter(None, [entity_phrase, date_ops]))
     q2 = " ".join(filter(None, [entity_phrase, " ".join(q_content_words[:4]), date_ops]))
-    option_queries = []
-    if option_texts:
-        for opt in option_texts[:4]:
-            opt_keywords = " ".join(t for t in _TOKEN_RE.findall(opt.lower()))[:50]
-            if opt_keywords:
-                option_queries.append(
-                    " ".join(filter(None, [entity_phrase, opt_keywords, date_ops]))
-                )
 
-    queries = list(dict.fromkeys(q for q in [q1, q2] + option_queries if q.strip()))
+    queries = list(dict.fromkeys(q for q in [q1, q2] if q.strip()))
     print(f"  [News] queries: {queries}")
 
     # --- keyword sets for scoring (computed once, outside the candidate loop) ---
