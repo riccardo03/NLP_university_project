@@ -433,6 +433,8 @@ def _generate_with_tools(messages: list, max_new_tokens: int = 180,
             )
         new_tokens = out[0][inputs["input_ids"].shape[1]:]
         raw = tok.decode(new_tokens, skip_special_tokens=False)
+        del inputs, out, new_tokens
+        torch.cuda.empty_cache()
         tool_call = _parse_tool_call(raw)
         # Strip <tool_call>...</tool_call> blocks and Qwen special tokens
         clean = re.sub(r'<tool_call>.*?</tool_call>', '', raw, flags=re.DOTALL)

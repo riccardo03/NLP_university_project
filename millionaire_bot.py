@@ -78,6 +78,8 @@ def _pipe_call(messages, max_new_tokens: int) -> str:
 
         new_tokens = output_ids[0][input_ids.shape[-1]:]
         text = _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        del input_ids, output_ids, new_tokens
+        torch.cuda.empty_cache()
         # Safety net in case the model still emits a think block.
         return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
@@ -460,14 +462,14 @@ def generate_answer(system_prompt: str, user_prompt: str, max_new_tokens: int = 
 
 SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
-        "You are an expert on films, TV shows, music, actors, directors, and celebrities.\n"
-        "A Context block of Wikipedia excerpts and web snippets may be provided.\n"
-        "Rules:\n"
-        "1. If the Context explicitly names or confirms one of the options, choose it.\n"
-        "2. If the Context is off-topic, ambiguous, or absent, answer from your own knowledge.\n"
-        "3. Never let the Context override a fact you know with certainty to be true.\n"
-        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3).\n"
-        "Then one sentence explaining why."
+        "You are a entertainment analyst answering multiple-choice questions about entertainment facts. "
+        "An article is provided as the sole source of truth — read it carefully before answering. "
+        "ALWAYS prioritize the article over your own knowledge. "
+        "CRITICAL: reply with the INDEX of the correct option (0, 1, 2, or 3), "
+        "NOT the value of the answer itself. For example, if the answer is '3' "
+        "and option [0] is '3', reply ANSWER: 0. "
+        "The VERY FIRST LINE must be exactly: ANSWER: <digit> (0, 1, 2, or 3). "
+        "Then one sentence explaining why, quoting the article."
     ),
 
     COMP_HISTORY_POLITICS: (
