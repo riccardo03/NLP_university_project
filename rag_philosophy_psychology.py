@@ -11,9 +11,9 @@ import re
 
 import requests
 
-_TIMEOUT           = 5
-_ARTICLE_MAX_CHARS = 4000
-_MAX_DDG_RESULTS   = 3
+_TIMEOUT           = 4
+_ARTICLE_MAX_CHARS = 10000
+_MAX_DDG_RESULTS   = 2
 
 _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY: frozenset[str] = frozenset({
     "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
@@ -141,7 +141,7 @@ def rag_philosophy_psychology(query: str, option_texts: list[str] | None = None)
             t for t in tokens if len(t) >= 4 and t not in _STOP_WORDS_PHILOSOPHY_PSYCHOLOGY
         )[:60]
 
-    n_opts      = min(len(option_texts), 4) if option_texts else 0
+    n_opts      = min(len(option_texts), 3) if option_texts else 0
 
     def _clean_option(opt: str) -> str:
         words = [

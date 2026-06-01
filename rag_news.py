@@ -12,10 +12,10 @@ import re
 
 import requests
 
-_TIMEOUT                  = 5
+_TIMEOUT                  = 4
 _ARTICLE_MAX_CHARS        = 10000
 _MIN_ARTICLE_CHARS        = 500
-_MAX_DDG_RESULTS          = 3
+_MAX_DDG_RESULTS          = 2
 
 _SKIP_DOMAINS: frozenset[str] = frozenset({
     "youtube.com",
