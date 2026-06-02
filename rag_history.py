@@ -3,20 +3,18 @@ import warnings
 
 import wikipedia
 
+from rag_utils import STOP_WORDS_BASE, ddg_search
+
 wikipedia.set_user_agent("PoliMillionaireBot_NLP_Project/3.0 (tuo_nome@mail.polimi.it)")
 wikipedia.set_lang("en")
 warnings.filterwarnings("ignore", category=UserWarning, module="wikipedia")
 
-STOPWORDS = {
-    "what", "how", "which", "in", "according", "why", "who", "where", "when",
-    "is", "are", "was", "were", "did", "do", "does", "the", "a", "an", "of",
-    "on", "at", "to", "for", "with", "by", "about", "and", "or", "it", "that",
-    "this", "following", "best", "describes", "describe", "term", "used",
-    "significance", "primary", "not", "purpose", "given", "information",
-    "provided", "contribute", "image", "true", "false", "statement", "refer",
-    "refers", "called", "known", "means", "choose", "between", "often",
+_STOP_WORDS_HISTORY: frozenset[str] = STOP_WORDS_BASE | {
+    "about", "it", "not", "term", "used", "significance", "primary", "purpose",
+    "given", "information", "provided", "contribute", "image", "true", "false",
+    "statement", "refer", "refers", "known", "means", "choose", "between", "often",
     "accompanied", "reason", "decline", "use", "approach", "idea", "various",
-    "claims", "claimed", "differ", "terms", "influence", "from", "cause", "connection",
+    "claims", "claimed", "differ", "terms", "influence", "cause", "connection",
 }
 
 
@@ -30,7 +28,7 @@ def get_smart_queries(question: str, option_texts: list) -> tuple:
     clean_q = re.sub(r"(?i)according to the (passage|article),?\s*", "", question)
     clean_q = re.sub(r"'s\b", "", clean_q)
     clean_q = re.sub(r"[^\w\s/]", " ", clean_q)
-    all_keywords = [w for w in clean_q.split() if w.lower() not in STOPWORDS]
+    all_keywords = [w for w in clean_q.split() if w.lower() not in _STOP_WORDS_HISTORY]
 
     shield_words = []
     for i, w in enumerate(all_keywords):
@@ -59,7 +57,7 @@ def get_smart_queries(question: str, option_texts: list) -> tuple:
                 if primary_ctx:
                     queries.append(f"{clean_opt} {primary_ctx}")
             else:
-                long_kws = [w for w in opt_words if len(w) >= 4 and w.lower() not in STOPWORDS]
+                long_kws = [w for w in opt_words if len(w) >= 4 and w.lower() not in _STOP_WORDS_HISTORY]
                 if long_kws and primary_ctx:
                     queries.append(f"{' '.join(long_kws[:2])} {primary_ctx}")
         if primary_ctx:
@@ -79,12 +77,12 @@ def extract_deep_details(full_text: str, option_texts: list, q_keywords: list) -
     if not option_texts:
         return ""
     paragraphs = full_text.split("\n")
-    q_words = {w.lower() for w in q_keywords if len(w) >= 3 and w.lower() not in STOPWORDS}
+    q_words = {w.lower() for w in q_keywords if len(w) >= 3 and w.lower() not in _STOP_WORDS_HISTORY}
     best_paragraphs = []
 
     for opt in option_texts:
         clean_opt = clean_option_prefix(opt)
-        opt_words = {w.lower() for w in clean_opt.split() if len(w) >= 2 and w.lower() not in STOPWORDS}
+        opt_words = {w.lower() for w in clean_opt.split() if len(w) >= 2 and w.lower() not in _STOP_WORDS_HISTORY}
         if not opt_words:
             continue
 
@@ -174,19 +172,9 @@ def rag_history(question_text: str, option_texts: list = None) -> str:
     if option_texts is None:
         option_texts = []
 
-    # DuckDuckGo (primary)
-    try:
-        from ddgs import DDGS
-        queries, _ = get_smart_queries(question_text, option_texts)
-        query = queries[0]
-        snippets = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=3):
-                snippets.append(f"[WEB SNIPPET: {r.get('title', '')}] {r.get('body', '')}")
-        if snippets:
-            return "\n\n".join(snippets)
-    except Exception:
-        pass
-
-    # Wikipedia fallback
+    queries, _ = get_smart_queries(question_text, option_texts)
+    results = ddg_search(queries[0], max_results=3, full=True)
+    snippets = [f"[WEB SNIPPET: {r['title']}] {r['body']}" for r in results]
+    if snippets:
+        return "\n\n".join(snippets)
     return _wikipedia_rag(question_text, option_texts)

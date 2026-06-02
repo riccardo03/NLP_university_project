@@ -6,41 +6,22 @@ Subject extraction uses a news-specific GLiNER call.
 
 import concurrent.futures
 import datetime
-import html as _html_module
 import math
 import re
 
-import requests
+from rag_utils import (
+    STOP_WORDS_BASE, SKIP_DOMAINS, SKIP_URL_PATTERNS,
+    fetch_article, ddg_search,
+    extract_subjects_gliner,
+)
 
-_TIMEOUT                  = 4
-_ARTICLE_MAX_CHARS        = 7000
-_MIN_ARTICLE_CHARS        = 500
-_MAX_DDG_RESULTS          = 3
+_TIMEOUT           = 4
+_MIN_ARTICLE_CHARS = 500
+_MAX_DDG_RESULTS   = 3
 
-_SKIP_DOMAINS: frozenset[str] = frozenset({
-    "youtube.com",
-    "instagram.com",
-    "tiktok.com",
-    "rutube.ru",
-    "linkedin.com",
-    "vk.com",
-    "t.me",
-})
-
-_SKIP_URL_PATTERNS: frozenset[str] = frozenset({
-    "/tag/", "/tags/", "/category/", "/categories/",
-    "/topic/", "/topics/", "/search/", "/archive/",
-})
-
-_STOP_WORDS_NEWS: frozenset[str] = frozenset({
-    "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by", "from",
-    "and", "or", "as", "is", "are", "was", "were", "be", "been", "being",
-    "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
-    "has", "have", "had", "will", "would", "could", "should", "can", "may",
-    "this", "that", "these", "those", "their", "there", "according", "following",
-    "describes", "describe", "best", "most", "called", "named", "article",
+_STOP_WORDS_NEWS: frozenset[str] = STOP_WORDS_BASE | {
     "published", "reported", "stated", "said",
-})
+}
 
 _GLINER_LABELS_NEWS: list[str] = [
     "person", "politician", "president", "minister", "official",
@@ -51,15 +32,8 @@ _GLINER_LABELS_NEWS: list[str] = [
 ]
 
 _DATE_ISO_RE = re.compile(r'\b((?:19|20)\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b')
-
-_TOKEN_RE     = re.compile(r'[£€$]?[a-zA-ZÀ-ÿ0-9]+')
-_BLOCK_TAG_RE = re.compile(
-    r'<(script|style|nav|header|footer|aside|noscript)[^>]*>.*?</\1>',
-    re.DOTALL | re.IGNORECASE,
-)
-_TAG_RE   = re.compile(r'<[^>]+>')
-_WS_RE    = re.compile(r'\s+')
-_P_TAG_RE = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
+# news needs £€$ for currency reporting
+_TOKEN_RE    = re.compile(r'[£€$]?[a-zA-ZÀ-ÿ0-9]+')
 
 
 # ---------------------------------------------------------------------------
@@ -67,91 +41,8 @@ _P_TAG_RE = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
 # ---------------------------------------------------------------------------
 
 def _extract_subjects_news(text: str) -> list[str]:
-    try:
-        import torch
-        from rag_entertainment import _gliner_model
-        if _gliner_model is None:
-            return []
-        with torch.no_grad():
-            entities = _gliner_model.predict_entities(text, _GLINER_LABELS_NEWS, threshold=0.4)
-        seen: set[str] = set()
-        result: list[str] = []
-        for ent in entities:
-            txt = ent["text"].strip()
-            if txt and txt.lower() not in seen:
-                seen.add(txt.lower())
-                result.append(txt)
-        return result
-    except Exception:
-        return []
-
-
-# ---------------------------------------------------------------------------
-# HTML stripping
-# ---------------------------------------------------------------------------
-
-def _strip_html(raw: str) -> str:
-    text = _BLOCK_TAG_RE.sub(" ", raw)
-    text = _TAG_RE.sub(" ", text)
-    text = _html_module.unescape(text)
-    text = _WS_RE.sub(" ", text)
-    return text.strip()
-
-
-def _extract_body(raw_html: str, max_chars: int = _ARTICLE_MAX_CHARS) -> str:
-    paragraphs = _P_TAG_RE.findall(raw_html)
-    body_parts: list[str] = []
-    total = 0
-
-    for p in paragraphs:
-        clean = _WS_RE.sub(" ", _TAG_RE.sub("", _html_module.unescape(p))).strip()
-        if len(clean) >= 80:
-            body_parts.append(clean)
-            total += len(clean) + 1
-            if total >= max_chars:
-                break
-
-    if body_parts:
-        return " ".join(body_parts)[:max_chars]
-
-    return _strip_html(raw_html)[:max_chars]
-
-
-# ---------------------------------------------------------------------------
-# DDG search — no lru_cache (news changes daily)
-# ---------------------------------------------------------------------------
-
-def _ddg_search(query: str, max_results: int = _MAX_DDG_RESULTS) -> list[str]:
-    try:
-        from ddgs import DDGS
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=max_results):
-                url = r.get("href") or r.get("url", "")
-                if url:
-                    results.append(url)
-        return results
-    except Exception as e:
-        print(f"  [RAG-News] DDG error: {e}")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# Article fetching
-# ---------------------------------------------------------------------------
-
-def _fetch_article(url: str) -> str:
-    try:
-        r = requests.get(
-            url,
-            timeout=(_TIMEOUT, _TIMEOUT),
-            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"},
-        )
-        if r.status_code != 200:
-            return ""
-        return _extract_body(r.text)
-    except Exception:
-        return ""
+    entities = extract_subjects_gliner(text, _GLINER_LABELS_NEWS, threshold=0.4)
+    return [t for t, _ in entities]
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +51,6 @@ def _fetch_article(url: str) -> str:
 
 def setup_news_rag() -> None:
     """No-op: GLiNER is loaded by setup_entertainment_rag()."""
-    pass
 
 
 def rag_news(query: str, option_texts: list[str] | None = None) -> str:
@@ -217,12 +107,12 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
     queries = list(dict.fromkeys(q for q in [q1, q2] if q.strip()))
     print(f"  [News] queries: {queries}")
 
-    # --- keyword sets for scoring (computed once, outside the candidate loop) ---
+    # --- keyword sets for scoring ---
     q_keywords = {
         t for t in _TOKEN_RE.findall(query.lower())
         if len(t) >= 4 and t not in _STOP_WORDS_NEWS
     }
-    option_kw  = {
+    option_kw = {
         t for opt in (option_texts or [])
         for t in _TOKEN_RE.findall(opt.lower())
         if len(t) >= 2 and t not in _STOP_WORDS_NEWS
@@ -231,7 +121,7 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
 
     def _search_and_fetch(q_text: str) -> list[tuple[str, str]]:
         results = []
-        for url in _ddg_search(q_text):
+        for url in ddg_search(q_text, max_results=_MAX_DDG_RESULTS, timeout=_TIMEOUT):
             if "wikipedia.org" in url:
                 try:
                     article_date = datetime.date.fromisoformat(raw_date) if raw_date else None
@@ -241,19 +131,21 @@ def rag_news(query: str, option_texts: list[str] | None = None) -> str:
                 if days_old < 7:
                     print(f"  [News] skipping Wikipedia (recent): {url[:80]}")
                     continue
-            elif any(domain in url for domain in _SKIP_DOMAINS) or \
-                 any(pat in url for pat in _SKIP_URL_PATTERNS):
+            elif any(domain in url for domain in SKIP_DOMAINS) or \
+                 any(pat in url for pat in SKIP_URL_PATTERNS):
                 print(f"  [News] skipping: {url[:80]}")
                 continue
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as fetch_pool:
-                fetch_fut = fetch_pool.submit(_fetch_article, url)
+                fetch_fut = fetch_pool.submit(
+                    fetch_article, url,
+                    user_agent="NewsBot/1.0", timeout=_TIMEOUT,
+                )
                 try:
                     text = fetch_fut.result(timeout=10)
                 except Exception:
                     print(f"  [News] fetch timeout: {url[:80]}")
                     text = ""
-            min_chars = _MIN_ARTICLE_CHARS
-            if text and len(text) >= min_chars and any(kw in text.lower() for kw in q_keywords):
+            if text and len(text) >= _MIN_ARTICLE_CHARS and any(kw in text.lower() for kw in q_keywords):
                 results.append((text, url))
         return results
 

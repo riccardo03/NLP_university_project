@@ -94,7 +94,6 @@ def _pipe_call(messages, max_new_tokens: int) -> str:
         raise
 
 
-
 def load_model(model_name: str = "Qwen/Qwen2.5-7B-Instruct") -> None:
     global _model, _tokenizer, _pipe
     print(f"Loading model: {model_name}")
@@ -147,15 +146,11 @@ def load_speech_model(model_name: str = "large-v3") -> None:
     _whisper_model = WhisperModel(
         model_name,
         device="cuda",
-        compute_type="int8"  # <-- THIS is your "quantization"
+        compute_type="int8"
     )
 
     print("Whisper ready.")
 
-# Short, neutral biasing context for Whisper. It nudges the decoder toward a
-# clean trivia transcription without instructing it to preserve literal speech
-# artifacts (the old "keep exactly as spoken" style caused label injection and
-# was sometimes copied verbatim into the output).
 MCQ_PROMPT = (
     "A clearly spoken trivia question and its answer choices. "
     "Transcribe the meaning accurately in clean English."
@@ -211,27 +206,16 @@ def transcribe_bytes(audio_bytes: bytes, prompt: str = "") -> str:
 # ---------------------------------------------------------------------------
 # MCQ normalization layer
 # ---------------------------------------------------------------------------
-# Words a TTS/ASR pass may prepend to an option but that are never part of the
-# actual answer. Matched case-insensitively against leading tokens.
 _OPTION_LABEL_WORDS = {"option", "answer", "choice", "letter"}
-# Punctuation that may cling to a leading letter marker ("B." / "B)" / "(B)").
 _LABEL_PUNCT = ".,):;(-"
 
 
 def normalize_option(text: str) -> str:
-    """Clean a single ASR-transcribed answer option using plain string ops.
-
-    Strips leading label artifacts ("Option A", "Answer:", "B)") and tidies
-    spacing/capitalization so a clean phrase reaches the LLM. Deliberately
-    avoids regex per the robustness requirements.
-    """
     if not text:
         return ""
 
     cleaned = text.strip()
 
-    # Peel leading label tokens one at a time: handles "Option", "B.", "Answer:"
-    # and combinations like "Option B." (at most a label word + a letter marker).
     for _ in range(3):
         parts = cleaned.split(None, 1)
         if not parts:
@@ -244,11 +228,9 @@ def normalize_option(text: str) -> str:
         else:
             break
 
-    # Drop any leftover leading separator and collapse internal whitespace.
     cleaned = cleaned.lstrip(_LABEL_PUNCT + " ").strip()
     cleaned = " ".join(cleaned.split())
 
-    # Sentence-case the first character if it came through lowercased.
     if cleaned and cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
 
@@ -256,11 +238,6 @@ def normalize_option(text: str) -> str:
 
 
 def _is_valid_option(text: str) -> bool:
-    """Reject empty strings and pure label/letter fragments (not real content).
-
-    A single real word (e.g. "Paris", "Evil") is considered valid; only
-    label artifacts with no payload are rejected.
-    """
     if not text or not text.strip():
         return False
     low = text.strip().lower().strip(_LABEL_PUNCT).strip()
@@ -270,7 +247,6 @@ def _is_valid_option(text: str) -> bool:
 
 
 def _extract_json(text: str) -> dict:
-    """Extract the first balanced JSON object from text, ignoring trailing content."""
     start = text.find("{")
     if start == -1:
         raise ValueError("No JSON object found in model output")
@@ -293,21 +269,13 @@ def parse_mcq_with_qwen(raw_text: str):
     result = _pipe_call(messages, max_new_tokens=150)
     return _extract_json(result)
 
+
 def transcribe_and_parse_mcq(audio_path: str):
     raw_text = transcribe_audio(audio_path)
     return parse_mcq_with_qwen(raw_text)
 
 
-
 def play_speech_game(client, comp_id: int) -> dict:
-    """Play a competition in speech mode using Whisper ASR.
-
-    Identical pipeline to play_game() but reads question and option text
-    from WAV audio (server TTS) transcribed by Whisper instead of the
-    server text field.  Falls back to the server text field if audio
-    transcription fails.  The returned log is compatible with
-    print_evaluation().
-    """
     from millionaire_client.exceptions import GameError
 
     game      = client.game.start(competition_id=comp_id, mode="speech")
@@ -336,7 +304,6 @@ def play_speech_game(client, comp_id: int) -> dict:
 
         print(f"\n--- Level {level} | Time: {time_left:.1f}s ---")
 
-        # Transcribe question audio; fall back to server text on failure
         try:
             q_audio = game.fetch_audio_question()
             q_raw   = transcribe_bytes(q_audio)
@@ -344,7 +311,6 @@ def play_speech_game(client, comp_id: int) -> dict:
             print(f"  [Whisper] Q audio failed: {e}. Using server text.")
             q_raw = question.text
 
-        # Transcribe each option audio sequentially (A → B → C → D)
         real_opts = question.options
         opt_raws  = []
         for real_opt in real_opts:
@@ -354,8 +320,7 @@ def play_speech_game(client, comp_id: int) -> dict:
             except GameError:
                 opt_raws.append(real_opt.text)
 
-        # Use Qwen to clean and structure the raw Whisper transcriptions.
-        # Skipped for News: TTS audio is clean and the step costs 3-5s per question.
+        # skip for News: audio is clean and Qwen costs 3-5s per question
         if comp_id == COMP_NEWS:
             q_text    = q_raw
             opt_texts = list(opt_raws)
@@ -378,9 +343,7 @@ def play_speech_game(client, comp_id: int) -> dict:
                 q_text    = q_raw
                 opt_texts = list(opt_raws)
 
-        # Normalization + validation gate — applied on BOTH paths so no raw
-        # Whisper artifact ("Option B.", "Answer", stray labels) can reach the
-        # RAG/LLM stage. Invalid options fall back to the server text, re-cleaned.
+        # strip ASR label artifacts; fall back to server text for invalid options
         opt_texts = [normalize_option(t) for t in opt_texts]
         for i, t in enumerate(opt_texts):
             if not _is_valid_option(t) and i < len(real_opts):
@@ -390,14 +353,12 @@ def play_speech_game(client, comp_id: int) -> dict:
         for i, t in enumerate(opt_texts):
             print(f"    [{real_opts[i].id}] {t}")
 
-        # Build lightweight option objects with real server IDs + transcribed texts
         class _SpeechOpt:
             def __init__(self, id_, text): self.id, self.text = id_, text
 
         speech_opts = [_SpeechOpt(real_opts[i].id, opt_texts[i])
                        for i in range(len(real_opts))]
 
-        # RAG retrieval + LLM inference (same pipeline as text mode)
         print("  [RAG] Searching for context...")
         t0      = time.time()
         context = get_context(comp_id, q_text, opt_texts)
@@ -545,20 +506,17 @@ _LETTER_MAP = {"a": 0, "b": 1, "c": 2, "d": 3}
 
 
 def extract_answer_id(text: str, num_options: int = 4) -> int:
-    # Priority 0: explicit structured tag "ANSWER: X"
     tag_match = re.search(r"\bANSWER\s*:\s*([0-3])\b", text, re.I)
     if tag_match:
         idx = int(tag_match.group(1))
         if idx < num_options:
             return idx
 
-    # Priority 1: standalone digit within valid range
     for m in re.findall(r"\b([0-3])\b", text):
         idx = int(m)
         if idx < num_options:
             return idx
 
-    # Priority 2: A/B/C/D letter mapping
     for m in re.findall(r"\b([A-Da-d])\b", text):
         idx = _LETTER_MAP.get(m.lower(), -1)
         if 0 <= idx < num_options:
