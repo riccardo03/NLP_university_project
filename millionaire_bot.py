@@ -186,6 +186,9 @@ Use "" for any option that is missing.
 def transcribe_audio(audio_path: str, prompt: str = "") -> str:
     global _whisper_model
 
+    if _whisper_model is None:
+        raise RuntimeError("Whisper model not loaded — call bot.load_speech_model() first.")
+
     segments, _ = _whisper_model.transcribe(
         audio_path,
         language="en",
@@ -282,8 +285,6 @@ def transcribe_and_parse_mcq(audio_path: str):
 
 
 def play_speech_game(client, comp_id: int) -> dict:
-    from millionaire_client.exceptions import GameError
-
     game      = client.game.start(competition_id=comp_id, mode="speech")
     comp_name = COMP_NAMES.get(comp_id, f"Competition {comp_id}")
 
@@ -323,7 +324,8 @@ def play_speech_game(client, comp_id: int) -> dict:
             try:
                 opt_audio = game.fetch_audio_option_next()
                 opt_raws.append(transcribe_bytes(opt_audio))
-            except GameError:
+            except Exception as e:
+                print(f"  [Whisper] Option audio failed: {e}. Using server text.")
                 opt_raws.append(real_opt.text)
 
         # skip for News: audio is clean and Qwen costs 3-5s per question
@@ -466,7 +468,7 @@ SYSTEM_PROMPTS = {
     COMP_ENTERTAINMENT: (
         "You are a entertainment analyst answering multiple-choice questions about entertainment facts. "
         "An article is provided as the sole source of truth — read it carefully before answering. "
-        "if u are 100\% sure of the answer, answer it, otherwise"
+        "if u are COMPLETELY sure about the answer, answer it, otherwise"
         "ALWAYS prioritize the article over your own knowledge. "
         "CRITICAL: reply with the INDEX of the correct option (0, 1, 2, or 3), "
         "NOT the value of the answer itself. For example, if the answer is '3' "
